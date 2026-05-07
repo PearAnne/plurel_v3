@@ -6,6 +6,7 @@ Synthetic Data unlocks Scaling Laws for Relational Foundation Models
 
 [![Project Page](https://img.shields.io/badge/Project-Page-blue?style=flat&logo=github)](https://snap-stanford.github.io/plurel/)
 [![arXiv](https://img.shields.io/badge/arXiv-2602.04029-b31b1b?style=flat&logo=arxiv)](https://arxiv.org/abs/2602.04029)
+[![PyPI](https://img.shields.io/pypi/v/plurel.svg?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/plurel/)
 
 <img src="docs/static/images/scaling_law.png" alt="Scaling Law Plot"/>
 </div>
@@ -29,9 +30,19 @@ PluRel is a framework for synthesizing diverse multi-tabular relational database
 <img src="docs/static/images/plurel_animated.gif" alt="PluRel Logo"/>
 
 
+## Installation
+
+To use PluRel as a library:
+
+```bash
+pip install plurel
+```
+
+Requires Python 3.12+. This installs the synthetic database generator only; the Rust context sampler and training scripts under `rt/` are part of the development setup below.
+
 ## Setup
 
-Setup the development and testing environment with [pixi](https://pixi.sh/latest/installation/).
+For development, testing, or running the pretraining scripts, set up the full environment with [pixi](https://pixi.sh/latest/installation/).
 
 ```bash
 # setup pixi environment
