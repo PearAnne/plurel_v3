@@ -81,7 +81,7 @@ polars = ">=1.37.1,<2"
 maturin_import_hook = ">=0.3.0,<0.4"
 matplotlib = ">=3.10.8,<4"
 scikit-learn = "<1.6.0"
-relbench = {git = "https://github.com/snap-stanford/relbench", rev = "71f5d50f3af25aa34ac1b9d3e093fa6d8e9b8459", extras = ["full"]}
+relbench = { version = "==1.1.0", extras = ["full"] }
 
 [tool.pixi.dependencies]
 pytest = ">=9.0.1,<10"

@@ -261,7 +261,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/10/bd/c038d7cc38edc1aa5bf91ab8068b63d4308c66c4c8bb3cbba7dfbc049f9c/pyparsing-3.3.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0f/31/557a7bf6047553ccb0dec77c239bac5e8d70a9f336b98076f97322e156ab/pytorch_frame-0.3.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/dd/df/0d722c030c82faa1d331d1921ee268a4e8fb55ca8b9042c9341c352f17fa/regex-2026.1.15-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
-      - pypi: git+https://github.com/snap-stanford/relbench?rev=71f5d50f3af25aa34ac1b9d3e093fa6d8e9b8459#71f5d50f3af25aa34ac1b9d3e093fa6d8e9b8459
+      - pypi: https://files.pythonhosted.org/packages/9a/b7/397832dd1aabacf000021b42f74153f323e52e11fcdde11084c792a51129/relbench-1.1.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a0/60/429e9b1cb3fc651937727befe258ea24122d9663e4d5709a48c9cbfceecb/safetensors-0.7.0-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/c6/29/044048c5e911373827c0e1d3051321b9183b2a4f8d4e2f11c08fcff83f13/scikit_learn-1.5.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/d1/fe/66d73b76d378ba8cc2fe605920c0c75092e3a65ae746e1e767d9d020a75a/scipy-1.17.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
@@ -501,7 +501,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/10/bd/c038d7cc38edc1aa5bf91ab8068b63d4308c66c4c8bb3cbba7dfbc049f9c/pyparsing-3.3.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0f/31/557a7bf6047553ccb0dec77c239bac5e8d70a9f336b98076f97322e156ab/pytorch_frame-0.3.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/19/4d/16d0773d0c818417f4cc20aa0da90064b966d22cd62a8c46765b5bd2d643/regex-2026.1.15-cp312-cp312-macosx_11_0_arm64.whl
-      - pypi: git+https://github.com/snap-stanford/relbench?rev=71f5d50f3af25aa34ac1b9d3e093fa6d8e9b8459#71f5d50f3af25aa34ac1b9d3e093fa6d8e9b8459
+      - pypi: https://files.pythonhosted.org/packages/9a/b7/397832dd1aabacf000021b42f74153f323e52e11fcdde11084c792a51129/relbench-1.1.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e8/00/374c0c068e30cd31f1e1b46b4b5738168ec79e7689ca82ee93ddfea05109/safetensors-0.7.0-cp38-abi3-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/54/1a/7deb52fa23aebb855431ad659b3c6a2e1709ece582cb3a63d66905e735fe/scikit_learn-1.5.2-cp312-cp312-macosx_12_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/ed/1d/5057f812d4f6adc91a20a2d6f2ebcdb517fdbc87ae3acc5633c9b97c8ba5/scipy-1.17.0-cp312-cp312-macosx_12_0_arm64.whl
@@ -4308,8 +4308,17 @@ packages:
   timestamp: 1764896838868
 - pypi: ./
   name: plurel
-  version: 0.1.0
-  sha256: cfc6a08d90c41b71eec33e578032bd02aa605104e8246c26ed07605c0addc7c2
+  version: 1.0.0
+  sha256: 321d65324f7b252d72a96f6f8b8bdc408a2fb9ea705fb007b64921cf206d46a0
+  requires_dist:
+  - networkx
+  - numpy
+  - pandas
+  - pytorch-frame
+  - relbench==1.1.0
+  - sqlalchemy>=2
+  - torch>=2
+  - tqdm
   requires_python: '>=3.12'
   editable: true
 - pypi: https://files.pythonhosted.org/packages/08/75/ec73e38812bca7c2240aff481b9ddff20d1ad2f10dee4b3353f5eeaacdab/polars-1.37.1-py3-none-any.whl
@@ -4999,27 +5008,27 @@ packages:
   version: 2026.1.15
   sha256: c32bef3e7aeee75746748643667668ef941d28b003bfc89994ecf09a10f7a1b5
   requires_python: '>=3.9'
-- pypi: git+https://github.com/snap-stanford/relbench?rev=71f5d50f3af25aa34ac1b9d3e093fa6d8e9b8459#71f5d50f3af25aa34ac1b9d3e093fa6d8e9b8459
+- pypi: https://files.pythonhosted.org/packages/9a/b7/397832dd1aabacf000021b42f74153f323e52e11fcdde11084c792a51129/relbench-1.1.0-py3-none-any.whl
   name: relbench
-  version: 1.1.0.dev20251121
+  version: 1.1.0
+  sha256: 41d0b697380d2980fe99532f4766a6f2bb9f6972e4e72f49d783f7f775bacae8
   requires_dist:
   - pandas
   - pooch
   - pyarrow
   - numpy
   - duckdb
-  - scikit-learn<=1.6.1
+  - scikit-learn
   - typing-extensions
-  - datasets
-  - pytorch-frame>=0.2.3 ; extra == 'full'
-  - torch-geometric ; extra == 'full'
+  - pre-commit ; extra == 'dev'
   - sentence-transformers ; extra == 'example'
   - pytorch-frame[full] ; extra == 'example'
   - torch-geometric ; extra == 'example'
   - tqdm ; extra == 'example'
+  - pytorch-frame>=0.2.3 ; extra == 'full'
+  - torch-geometric ; extra == 'full'
   - pytest ; extra == 'test'
-  - pre-commit ; extra == 'dev'
-  requires_python: '>=3.10'
+  requires_python: '>=3.8'
 - conda: https://conda.anaconda.org/conda-forge/noarch/requests-2.32.5-pyhcf101f3_1.conda
   sha256: 7813c38b79ae549504b2c57b3f33394cea4f2ad083f0994d2045c2e24cb538c5
   md5: c65df89a0b2e321045a9e01d1337b182
