@@ -40,6 +40,9 @@ pip install plurel
 
 Requires Python 3.12+. This installs the synthetic database generator only; the Rust context sampler and training scripts under `rt/` are part of the development setup below.
 
+> [!NOTE]
+> The published PyPI package tracks the `v1.0.0` release. The latest features and performance improvements live on `main` and may not yet be in a tagged release — install from source if you need them.
+
 ## Setup
 
 For development, testing, or running the pretraining scripts, set up the full environment with [pixi](https://pixi.sh/latest/installation/).
