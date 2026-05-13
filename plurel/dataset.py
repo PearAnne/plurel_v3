@@ -6,6 +6,7 @@ from relbench.base import Database, Dataset, Table
 from plurel.config import Config
 from plurel.schema import RandomSchemaGraphBuilder, SQLSchemaGraphBuilder
 from plurel.scm import SCM
+from plurel.topology_prior import EdgePriorSpec
 from plurel.utils import TableType, set_random_seed
 
 COLUMN_TRANSFORM_REGISTRY: dict[str, callable] = {
@@ -68,7 +69,7 @@ class SyntheticDataset(Dataset):
         return builder.build_graph()
 
     def _get_schema_file_table_relationships(self, schema_file: str):
-        builder = SQLSchemaGraphBuilder(sql_file=schema_file)
+        builder = SQLSchemaGraphBuilder(sql_file=schema_file, config=self.config)
         builder.load_schema()
         return builder.build_graph()
 
@@ -111,9 +112,17 @@ class SyntheticDataset(Dataset):
             num_rows = self.config.database_params.num_rows_activity_table_choices.sample_uniform()
         return num_rows
 
-    def apply_col_transforms(self, df, pkey_col, fkey_cols):
+    def apply_col_transforms(
+        self, df: pd.DataFrame, pkey_col: str | None, fkey_cols: list[str]
+    ) -> pd.DataFrame:
+        protected_cols = {col for col in [pkey_col, *fkey_cols, "date"] if col is not None}
         for col_name, _type in df.dtypes.items():
-            if col_name not in [pkey_col, *fkey_cols, "date"] and _type in [float]:
+            if _type in [float]:
+                assert col_name not in fkey_cols, (
+                    f"FK column {col_name!r} in table post-processing must not be "
+                    "handled as an ordinary float feature column"
+                )
+            if col_name not in protected_cols and _type in [float]:
                 col_transform_name = (
                     self.config.database_params.col_transform_choices.sample_uniform()
                 )
@@ -121,11 +130,19 @@ class SyntheticDataset(Dataset):
                 df[col_name] = col_transform(df[col_name].values).astype(float)
         return df
 
-    def implant_nan(self, df, pkey_col, fkey_cols):
+    def implant_nan(
+        self, df: pd.DataFrame, pkey_col: str | None, fkey_cols: list[str]
+    ) -> pd.DataFrame:
         nan_perc = self.config.database_params.column_nan_perc_choices.sample_uniform()
         num_nan_cells = int(np.floor(nan_perc * len(df)))
+        protected_cols = {col for col in [pkey_col, *fkey_cols] if col is not None}
         for col_name, _type in df.dtypes.items():
-            if col_name not in [pkey_col, *fkey_cols] and _type in [float]:
+            if _type in [float]:
+                assert col_name not in fkey_cols, (
+                    f"FK column {col_name!r} in table post-processing must not receive "
+                    "ordinary feature-column missingness"
+                )
+            if col_name not in protected_cols and _type in [float]:
                 nan_cells_idx = np.random.choice(df.index, size=num_nan_cells, replace=False)
                 df.loc[nan_cells_idx, col_name] = np.nan
         return df
@@ -182,6 +199,10 @@ class SyntheticDataset(Dataset):
                     foreign_table_name: table_name_to_scm[foreign_table_name]
                     for foreign_table_name in fkey_col_to_pkey_table.values()
                 }
+                fk_edge_priors = self._get_fk_edge_priors(
+                    table_id=table_id,
+                    fkey_col_to_pkey_table=fkey_col_to_pkey_table,
+                )
                 scm = SCM(
                     table_name=table_name,
                     child_table_names=child_table_names,
@@ -189,6 +210,7 @@ class SyntheticDataset(Dataset):
                     pkey_col=pkey_col,
                     fkey_col_to_pkey_table=fkey_col_to_pkey_table,
                     foreign_scm_info=foreign_scm_info,
+                    fk_edge_priors=fk_edge_priors,
                     scm_params=self.config.scm_params,
                     dag_params=self.config.dag_params,
                 )
@@ -245,3 +267,31 @@ class SyntheticDataset(Dataset):
             )
 
         return Database(table_dict)
+
+    def _get_fk_edge_priors(
+        self,
+        table_id: int | str,
+        fkey_col_to_pkey_table: dict[str, str],
+    ) -> dict[tuple[str, str], EdgePriorSpec]:
+        fk_edge_priors: dict[tuple[str, str], EdgePriorSpec] = {}
+        for fkey_col, parent_table_name in fkey_col_to_pkey_table.items():
+            parent_table_id = self._find_parent_table_id(
+                child_table_id=table_id,
+                parent_table_name=parent_table_name,
+            )
+            edge_attrs = self.table_relationships.edges[parent_table_id, table_id]
+            fk_edge_priors[(fkey_col, parent_table_name)] = EdgePriorSpec(
+                kind=str(edge_attrs.get("prior_kind", "hsbm")),
+                params=dict(edge_attrs.get("prior_params", {})),
+                null_rate=float(edge_attrs.get("null_rate", 0.0)),
+            )
+        return fk_edge_priors
+
+    def _find_parent_table_id(self, child_table_id: int | str, parent_table_name: str):
+        for parent_table_id in self.table_relationships.predecessors(child_table_id):
+            if self.table_relationships.nodes[parent_table_id]["name"] == parent_table_name:
+                return parent_table_id
+        raise KeyError(
+            f"Could not find parent table {parent_table_name!r} for child table "
+            f"{self.table_relationships.nodes[child_table_id]['name']!r}"
+        )

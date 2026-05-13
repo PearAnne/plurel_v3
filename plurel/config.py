@@ -106,6 +106,7 @@ class DatabaseParams:
         kind="set",
         value=["identity", "rank_uniform", "log", "sqrt", "standardize"],
     )
+    edge_prior_assignment_strategy: Literal["db_level", "edge_level_uniform"] = "db_level"
 
 
 @dataclass(frozen=True)
@@ -177,6 +178,14 @@ class SCMParams:
 
     bi_hsbm_levels_choices: Choices = Choices(kind="range", value=[1, 5])
     bi_hsbm_clusters_per_level_choices: Choices = Choices(kind="range", value=[1, 3])
+    topology_prior_choices: Choices = Choices(kind="set", value=["hsbm"])
+    chung_lu_gamma_choices: Choices = Choices(kind="range", value=[1.5, 3.0])
+    dcsbm_theta_alpha_choices: Choices = Choices(kind="range", value=[0.5, 5.0])
+    dcsbm_theta_beta_choices: Choices = Choices(kind="range", value=[0.5, 5.0])
+    dcsbm_degree_correction_strength_choices: Choices = Choices(kind="range", value=[0.3, 0.8])
+    tpa_alpha_choices: Choices = Choices(kind="range", value=[0.5, 1.5])
+    tpa_beta_choices: Choices = Choices(kind="range", value=[0.0, 0.5])
+    edge_prior_null_rate_choices: Choices = Choices(kind="range", value=[0.0, 0.0])
 
     ts_trend_alpha_choices: Choices = Choices(kind="range", value=[0.0, 2.0])
     activity_table_ts_trend_scale_choices: Choices = Choices(kind="set", value=[-1, 1])

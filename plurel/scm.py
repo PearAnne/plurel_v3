@@ -12,9 +12,13 @@ from torch.distributions import Beta
 from torch_frame import stype
 from tqdm import tqdm
 
-from plurel.bipartite import sample_bipartite_assignments
 from plurel.config import DAGParams, SCMParams
 from plurel.dag import DAG_REGISTRY
+from plurel.topology_prior import (
+    TOPOLOGY_PRIOR_REGISTRY,
+    EdgePriorSpec,
+    StructuralNullDecorator,
+)
 from plurel.transforms import MLP, CategoricalDecoder, CategoricalEncoder
 from plurel.ts import (
     BetaSourceGenerator,
@@ -315,6 +319,8 @@ AGGREGATION_REGISTRY: dict[str, callable] = {
     "logexp": lambda s: torch.logsumexp(s, dim=0),
 }
 
+ForeignKeyRef = tuple[str, str]
+
 
 class SCM:
     def __init__(
@@ -327,6 +333,7 @@ class SCM:
         foreign_scm_info: dict[str, SCM],
         scm_params: SCMParams,
         dag_params: DAGParams,
+        fk_edge_priors: dict[ForeignKeyRef, EdgePriorSpec] | None = None,
         seed: int | None = None,
     ):
         self.table_name = table_name
@@ -336,6 +343,7 @@ class SCM:
         self.pkey_col = pkey_col
         self.fkey_col_to_pkey_table = fkey_col_to_pkey_table
         self.foreign_scm_info = foreign_scm_info
+        self.fk_edge_priors = fk_edge_priors or {}
         self.scm_params = scm_params
         self.dag_params = dag_params
         self.seed = seed
@@ -351,7 +359,16 @@ class SCM:
         self.initialize_dag()
         self.initialize_nodes_and_edges()
         self._topological_generations = list(nx.topological_generations(self.dag.graph))
-        self._collation_cache: dict[str, list[tuple]] = {}
+        self.foreign_key_refs: tuple[ForeignKeyRef, ...] = tuple(
+            (fkey_col, foreign_table_name)
+            for fkey_col, foreign_table_name in self.fkey_col_to_pkey_table.items()
+        )
+        self.foreign_row_idxs_map: dict[ForeignKeyRef, np.ndarray] = {}
+        self.foreign_null_mask_map: dict[ForeignKeyRef, np.ndarray | None] = {
+            foreign_key_ref: None for foreign_key_ref in self.foreign_key_refs
+        }
+        self._collation_cache: dict[tuple[str, str | None], list[tuple]] = {}
+        self._child_timestamps_for_prior: np.ndarray | None = None
 
     def initialize_dag(self):
         dag_class = self.scm_params.scm_layout_choices.sample_uniform()
@@ -488,8 +505,10 @@ class SCM:
                 noise_dist.sample(sample_shape=(self.num_rows, emb_dim)).squeeze(-1) / emb_dim
             )
 
-        foreign_table_names = list(self.fkey_col_to_pkey_table.values())
-        foreign_scms = [self.foreign_scm_info[fname] for fname in foreign_table_names]
+        foreign_key_refs = list(self.foreign_key_refs)
+        foreign_scms = [
+            self.foreign_scm_info[foreign_table_name] for _, foreign_table_name in foreign_key_refs
+        ]
 
         col_node_chunks: dict[int, list[torch.Tensor]] = {node: [] for node in self.col_nodes}
 
@@ -498,11 +517,19 @@ class SCM:
             chunk_end = min(chunk_start + batch_size, self.num_rows)
 
             foreign_scms_embds: list[list[torch.Tensor]] = []
-            for fname, foreign_scm in zip(foreign_table_names, foreign_scms):
-                chunk_foreign_idxs = self.foreign_row_idxs_map[fname][chunk_start:chunk_end]
+            for (fkey_col, foreign_table_name), foreign_scm in zip(foreign_key_refs, foreign_scms):
+                foreign_key_ref = (fkey_col, foreign_table_name)
+                chunk_foreign_idxs = self.foreign_row_idxs_map[foreign_key_ref][
+                    chunk_start:chunk_end
+                ]
+                null_mask = self.foreign_null_mask_map[foreign_key_ref]
+                chunk_null_mask = None if null_mask is None else null_mask[chunk_start:chunk_end]
                 foreign_scms_embds.append(
                     foreign_scm.collate_feature_embeddings(
-                        row_idxs=chunk_foreign_idxs, child_table_name=self.table_name
+                        row_idxs=chunk_foreign_idxs,
+                        child_table_name=self.table_name,
+                        fkey_col=fkey_col,
+                        null_mask=chunk_null_mask,
                     )
                 )
 
@@ -554,31 +581,83 @@ class SCM:
             )
 
     def initialize_bi_fk_pk_graph_map(self):
-        """Sample, for each foreign table, a parent-row index per child row
-        from a hierarchical SBM joint distribution. Stored as a flat
-        ``(num_rows,)`` int64 array per foreign table.
-        """
-        self.foreign_row_idxs_map: dict[str, np.ndarray] = {}
-        for foreign_table_name, foreign_scm in tqdm(
-            self.foreign_scm_info.items(),
+        """Sample parent-row indices for each FK edge."""
+        self.foreign_row_idxs_map = {}
+        self.foreign_null_mask_map = {}
+        for fkey_col, foreign_table_name in tqdm(
+            self.fkey_col_to_pkey_table.items(),
             desc="Sampling FK→PK assignments",
             leave=False,
         ):
-            num_levels = self.scm_params.bi_hsbm_levels_choices.sample_uniform()
-            hierarchy_a = [
-                self.scm_params.bi_hsbm_clusters_per_level_choices.sample_uniform()
-                for _ in range(num_levels)
-            ]
-            hierarchy_b = [
-                self.scm_params.bi_hsbm_clusters_per_level_choices.sample_uniform()
-                for _ in range(num_levels)
-            ]
-            self.foreign_row_idxs_map[foreign_table_name] = sample_bipartite_assignments(
+            foreign_key_ref = (fkey_col, foreign_table_name)
+            foreign_scm = self.foreign_scm_info[foreign_table_name]
+            spec = self._resolve_edge_prior_spec(
+                foreign_key_ref=foreign_key_ref,
+                size_a=len(foreign_scm.df),
+            )
+            sampler_class = TOPOLOGY_PRIOR_REGISTRY.get(spec.kind)
+            if sampler_class is None:
+                raise ValueError(f"Unknown topology prior kind: {spec.kind}")
+
+            sampler = sampler_class()
+            params = dict(spec.params)
+            if spec.null_rate > 0.0:
+                params["null_rate"] = spec.null_rate
+                sampler = StructuralNullDecorator(sampler)
+            rng = (
+                np.random.default_rng(0)
+                if spec.kind == "hsbm" and spec.null_rate <= 0.0
+                else self._get_edge_prior_rng()
+            )
+
+            parent_idx, null_mask = sampler.sample(
                 size_a=len(foreign_scm.df),
                 size_b=self.num_rows,
-                hierarchy_a=hierarchy_a,
-                hierarchy_b=hierarchy_b,
+                params=params,
+                rng=rng,
+                child_timestamps=self._child_timestamps_for_prior,
             )
+            self.foreign_row_idxs_map[foreign_key_ref] = parent_idx
+            self.foreign_null_mask_map[foreign_key_ref] = null_mask
+
+    def _resolve_edge_prior_spec(
+        self,
+        foreign_key_ref: ForeignKeyRef,
+        size_a: int,
+    ) -> EdgePriorSpec:
+        if size_a <= 0:
+            raise ValueError(f"Parent table for FK {foreign_key_ref!r} must have at least one row")
+
+        spec = self.fk_edge_priors.get(foreign_key_ref)
+        if spec is None:
+            spec = EdgePriorSpec(kind="hsbm", params={}, null_rate=0.0)
+
+        params = dict(spec.params)
+        if spec.kind in {"hsbm", "dcsbm"} and (
+            "hierarchy_a" not in params or "hierarchy_b" not in params
+        ):
+            hierarchy_a, hierarchy_b = self._sample_hsbm_hierarchies()
+            params.setdefault("hierarchy_a", hierarchy_a)
+            params.setdefault("hierarchy_b", hierarchy_b)
+        return EdgePriorSpec(kind=spec.kind, params=params, null_rate=spec.null_rate)
+
+    def _sample_hsbm_hierarchies(self) -> tuple[list[int], list[int]]:
+        num_levels = self.scm_params.bi_hsbm_levels_choices.sample_uniform()
+        hierarchy_a = [
+            self.scm_params.bi_hsbm_clusters_per_level_choices.sample_uniform()
+            for _ in range(num_levels)
+        ]
+        hierarchy_b = [
+            self.scm_params.bi_hsbm_clusters_per_level_choices.sample_uniform()
+            for _ in range(num_levels)
+        ]
+        return hierarchy_a, hierarchy_b
+
+    def _get_edge_prior_rng(self) -> np.random.Generator:
+        if not hasattr(self, "_edge_prior_rng"):
+            seed = self.seed if self.seed is not None else np.random.randint(0, 2**32 - 1)
+            self._edge_prior_rng = np.random.default_rng(seed)
+        return self._edge_prior_rng
 
     def _apply_categorical_quantization(self):
         for node in self.col_nodes:
@@ -612,6 +691,11 @@ class SCM:
     ):
         self.num_rows = num_rows
         self.initialize_ts_data_gens(num_rows=num_rows, table_type=table_type)
+        self._child_timestamps_for_prior = self._derive_child_timestamps_for_prior(
+            num_rows=num_rows,
+            min_timestamp=min_timestamp,
+            max_timestamp=max_timestamp,
+        )
         self.initialize_bi_fk_pk_graph_map()
         self.propagate()
 
@@ -619,7 +703,17 @@ class SCM:
         if self.pkey_col is not None:
             df_dict[self.pkey_col] = np.arange(num_rows, dtype=np.int64)
         for fkey_col, foreign_table_name in self.fkey_col_to_pkey_table.items():
-            df_dict[fkey_col] = self.foreign_row_idxs_map[foreign_table_name]
+            foreign_key_ref = (fkey_col, foreign_table_name)
+            fk_values = self.foreign_row_idxs_map[foreign_key_ref]
+            null_mask = self.foreign_null_mask_map[foreign_key_ref]
+            fk_series = pd.Series(fk_values, dtype="Int64")
+            if null_mask is not None:
+                assert len(null_mask) == len(fk_series), (
+                    f"null mask for FK {fkey_col!r} in table {self.table_name!r} has "
+                    f"length {len(null_mask)}, expected {len(fk_series)}"
+                )
+                fk_series.loc[null_mask] = pd.NA
+            df_dict[fkey_col] = fk_series
         for node in sorted(self.col_nodes):
             col_name = self.dag.graph.nodes[node]["col_name"]
             value = self.dag.graph.nodes[node]["value"]
@@ -633,22 +727,37 @@ class SCM:
         self.df = pd.DataFrame(df_dict)
 
         self.strategy.post_generate(scm=self)
-        if min_timestamp and max_timestamp:
-            self.df["date"] = pd.date_range(
-                start=min_timestamp, end=max_timestamp, periods=num_rows
-            )
+        if self._child_timestamps_for_prior is not None:
+            self.df["date"] = self._child_timestamps_for_prior
         return self.df
 
-    def collate_feature_embeddings(self, row_idxs: np.ndarray, child_table_name: str):
+    def _derive_child_timestamps_for_prior(
+        self,
+        num_rows: int,
+        min_timestamp: pd.Timestamp | None,
+        max_timestamp: pd.Timestamp | None,
+    ) -> np.ndarray | None:
+        if min_timestamp is None or max_timestamp is None:
+            return None
+        return pd.date_range(start=min_timestamp, end=max_timestamp, periods=num_rows).to_numpy()
+
+    def collate_feature_embeddings(
+        self,
+        row_idxs: np.ndarray,
+        child_table_name: str,
+        fkey_col: str | None = None,
+        null_mask: np.ndarray | None = None,
+    ):
         """Encode parent column values at the given row indices for cross-SCM
         propagation. Returns one (N, emb_dim) tensor per col-node, where N is
         the length of row_idxs.
         """
-        if child_table_name not in self._collation_cache:
+        cache_key = (child_table_name, fkey_col)
+        if cache_key not in self._collation_cache:
             # (col_name, _stype, encoder, col_values_array) — stable across calls
-            # for this child_table_name; col_values_array caches the numpy view
+            # for this FK edge; col_values_array caches the numpy view
             # of self.df[col_name] so per-chunk gathers don't re-pay pandas cost.
-            self._collation_cache[child_table_name] = [
+            self._collation_cache[cache_key] = [
                 (
                     self.dag.graph.nodes[node]["col_name"],
                     self.dag.graph.nodes[node]["_stype"],
@@ -659,10 +768,24 @@ class SCM:
                 )
                 for node in sorted(self.col_nodes)
             ]
-        col_entries = self._collation_cache[child_table_name]
+        col_entries = self._collation_cache[cache_key]
+        row_idxs = np.asarray(row_idxs)
+        if null_mask is not None:
+            null_mask = np.asarray(null_mask, dtype=bool)
+            assert len(null_mask) == len(row_idxs), (
+                f"null mask from child table {child_table_name!r} through FK "
+                f"{fkey_col!r} has length {len(null_mask)}, expected {len(row_idxs)}"
+            )
+            if null_mask.any():
+                row_idxs = row_idxs.copy()
+                row_idxs[null_mask] = 0
         embds: list[torch.Tensor] = []
         for _col_name, _stype, encoder, col_values_arr in col_entries:
             col_values = col_values_arr[row_idxs]
             value_tensor = self.strategy.tensorize_col(values=col_values, _stype=_stype)
-            embds.append(encoder(value_tensor))
+            encoded = encoder(value_tensor)
+            if null_mask is not None and null_mask.any():
+                encoded = encoded.clone()
+                encoded[torch.as_tensor(null_mask, dtype=torch.bool)] = 0
+            embds.append(encoded)
         return embds

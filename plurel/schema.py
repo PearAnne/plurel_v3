@@ -1,4 +1,5 @@
 import networkx as nx
+import numpy as np
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -21,6 +22,22 @@ from torch_frame import stype
 
 from plurel.config import Config
 from plurel.dag import DAG_REGISTRY
+
+
+def _sample_choice_with_rng(choice, rng: np.random.Generator):
+    if choice.kind == "range":
+        low, high = choice.value
+        if type(low) == int:
+            return rng.integers(low=low, high=high + 1)
+        if type(low) == float:
+            return rng.uniform(low=low, high=high)
+        raise ValueError(
+            f"Unsupported data type: {type(low)} for uniform sampling. "
+            "The 'value' elements should be either int/float."
+        )
+    if choice.kind == "set":
+        return rng.choice(choice.value)
+    raise ValueError(f"Invalid kind of choices: {choice.kind}")
 
 
 class RandomSchemaGraphBuilder:
@@ -103,7 +120,73 @@ class RandomSchemaGraphBuilder:
             for k, v in metadata.items():
                 G.nodes[table_id][k] = v
 
+        self._assign_edge_priors(G)
         return G
+
+    def _assign_edge_priors(self, G: nx.DiGraph) -> None:
+        strategy = self.config.database_params.edge_prior_assignment_strategy
+        if strategy not in ["db_level", "edge_level_uniform"]:
+            raise ValueError(f"Unknown edge prior assignment strategy: {strategy}")
+
+        rng = np.random.default_rng(self.seed)
+        db_level_kind = self._sample_prior_kind(rng) if strategy == "db_level" else None
+        for parent_table_id, child_table_id in G.edges:
+            kind = db_level_kind if db_level_kind is not None else self._sample_prior_kind(rng)
+            params = self._sample_prior_params(kind=kind, rng=rng)
+            G.edges[parent_table_id, child_table_id]["prior_kind"] = kind
+            G.edges[parent_table_id, child_table_id]["prior_params"] = params
+            G.edges[parent_table_id, child_table_id]["null_rate"] = float(
+                _sample_choice_with_rng(
+                    self.config.scm_params.edge_prior_null_rate_choices, rng=rng
+                )
+            )
+
+    def _sample_prior_kind(self, rng: np.random.Generator) -> str:
+        choices = list(self.config.scm_params.topology_prior_choices.value)
+        if not choices:
+            raise ValueError("topology_prior_choices must not be empty")
+        return str(rng.choice(choices))
+
+    def _sample_prior_params(self, kind: str, rng: np.random.Generator) -> dict:
+        if kind == "hsbm":
+            return {}
+        if kind == "erdos_renyi":
+            return {}
+        if kind == "chung_lu":
+            return {
+                "gamma": float(
+                    _sample_choice_with_rng(self.config.scm_params.chung_lu_gamma_choices, rng=rng)
+                )
+            }
+        if kind == "dcsbm":
+            return {
+                "theta_alpha": float(
+                    _sample_choice_with_rng(
+                        self.config.scm_params.dcsbm_theta_alpha_choices, rng=rng
+                    )
+                ),
+                "theta_beta": float(
+                    _sample_choice_with_rng(
+                        self.config.scm_params.dcsbm_theta_beta_choices, rng=rng
+                    )
+                ),
+                "degree_correction_strength": float(
+                    _sample_choice_with_rng(
+                        self.config.scm_params.dcsbm_degree_correction_strength_choices,
+                        rng=rng,
+                    )
+                ),
+            }
+        if kind == "tpa":
+            return {
+                "alpha": float(
+                    _sample_choice_with_rng(self.config.scm_params.tpa_alpha_choices, rng=rng)
+                ),
+                "beta": float(
+                    _sample_choice_with_rng(self.config.scm_params.tpa_beta_choices, rng=rng)
+                ),
+            }
+        raise ValueError(f"Unknown topology prior kind: {kind}")
 
 
 class SQLSchemaGraphBuilder:
@@ -117,8 +200,9 @@ class SQLSchemaGraphBuilder:
         sql_file: Path to the SQL schema file.
     """
 
-    def __init__(self, sql_file: str):
+    def __init__(self, sql_file: str, config: Config | None = None):
         self.sql_file = sql_file
+        self.config = config or Config()
         self.metadata = MetaData()
         self.tables = {}
 
@@ -268,6 +352,17 @@ class SQLSchemaGraphBuilder:
         for table_name, table_info in self.tables.items():
             for _, ref_table in table_info["fkey_col_to_pkey_table"].items():
                 G.add_edge(ref_table, table_name)
+
+        kind = str(self.config.scm_params.topology_prior_choices.value[0])
+        rng = np.random.default_rng(0)
+        for parent_table, child_table in G.edges:
+            G.edges[parent_table, child_table]["prior_kind"] = kind
+            G.edges[parent_table, child_table]["prior_params"] = {}
+            G.edges[parent_table, child_table]["null_rate"] = float(
+                _sample_choice_with_rng(
+                    self.config.scm_params.edge_prior_null_rate_choices, rng=rng
+                )
+            )
 
         return G
 

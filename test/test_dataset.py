@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from plurel.config import Choices, Config, DatabaseParams
+from plurel.config import Choices, Config, DatabaseParams, SCMParams
 from plurel.dataset import COLUMN_TRANSFORM_REGISTRY, SyntheticDataset
 
 _TRANSFORM_INPUTS = {
@@ -49,3 +49,29 @@ def test_column_transform_finite(transform_name, input_name):
     assert np.all(np.isfinite(result)), (
         f"transform '{transform_name}' on '{input_name}' produced non-finite values"
     )
+
+
+@pytest.mark.parametrize("prior_kind", ["hsbm", "erdos_renyi", "chung_lu", "dcsbm", "tpa"])
+def test_dataset_make_db_with_topology_prior(prior_kind):
+    config = Config(
+        database_params=DatabaseParams(
+            num_tables_choices=Choices(kind="range", value=[3, 3]),
+            num_rows_entity_table_choices=Choices(kind="range", value=[20, 30]),
+            num_rows_activity_table_choices=Choices(kind="range", value=[40, 60]),
+            column_nan_perc_choices=Choices(kind="range", value=[0.0, 0.0]),
+        ),
+        scm_params=SCMParams(
+            topology_prior_choices=Choices(kind="set", value=[prior_kind]),
+            edge_prior_null_rate_choices=Choices(kind="range", value=[0.0, 0.0]),
+            propagate_batch_size=128,
+        ),
+    )
+    dataset = SyntheticDataset(seed=0, config=config)
+
+    db = dataset.make_db()
+
+    assert db is not None
+    for table in db.table_dict.values():
+        assert len(table.df) > 0
+        for fkey_col in table.fkey_col_to_pkey_table:
+            assert str(table.df[fkey_col].dtype) in {"int64", "Int64"}
