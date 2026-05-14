@@ -20,13 +20,25 @@ DEFAULT_METRICS = [
 ]
 
 
+def _coerce_metric_float(metric_value: Any) -> float | None:
+    """Return a finite float for numeric metrics; skip strings like cardinality_kind."""
+    if metric_value is None:
+        return None
+    try:
+        value = float(metric_value)
+    except (TypeError, ValueError):
+        return None
+    return value if np.isfinite(value) else None
+
+
 def load_metric_frame(summary_path: Path, cohort: str) -> pd.DataFrame:
     payload = json.loads(summary_path.expanduser().read_text(encoding="utf-8"))
     rows = []
     for row in payload.get("rows", []):
         metrics = row.get("metrics", {})
         for metric_name, metric_value in metrics.items():
-            if metric_value is None:
+            coerced = _coerce_metric_float(metric_value)
+            if coerced is None:
                 continue
             rows.append(
                 {
@@ -36,7 +48,7 @@ def load_metric_frame(summary_path: Path, cohort: str) -> pd.DataFrame:
                     "fkey_col": row["fkey_col"],
                     "parent_table": row["parent_table"],
                     "metric_name": metric_name,
-                    "metric_value": float(metric_value),
+                    "metric_value": coerced,
                 }
             )
     return pd.DataFrame(rows)

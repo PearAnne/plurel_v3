@@ -20,10 +20,15 @@ use std::collections::HashMap;
 use std::env::var;
 use std::fs;
 use std::io::{BufReader, Read};
+use std::path::Path;
 use std::str;
 use std::time::Instant;
 
 const MAX_F2P_NBRS: usize = 5;
+
+fn pre_root() -> String {
+    var("PLUREL_PRE_ROOT").unwrap_or_else(|_| format!("{}/scratch/pre", var("HOME").unwrap()))
+}
 
 struct Vecs {
     node_idxs: Vec<i32>,
@@ -269,8 +274,10 @@ impl Sampler {
     ) -> Self {
         let mut datasets = Vec::new();
 
+        let pre_root = pre_root();
         for (db_name, _node_idx_offset, _num_nodes) in dataset_tuples.iter() {
-            let pre_path = format!("{}/scratch/pre/{}", var("HOME").unwrap(), db_name);
+            let pre_path = Path::new(&pre_root).join(db_name);
+            let pre_path = pre_path.to_string_lossy();
             let nodes_path = format!("{}/nodes.rkyv", pre_path);
             let file = fs::File::open(&nodes_path).unwrap();
             let mmap = unsafe { Mmap::map(&file).unwrap() };

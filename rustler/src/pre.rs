@@ -14,7 +14,7 @@ use std::hash::{BuildHasherDefault, DefaultHasher};
 use std::io::BufWriter;
 use std::io::{Seek, Write};
 use std::iter;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 //Function to automatically binarize a column based on its first non-null value
@@ -56,6 +56,14 @@ pub struct Cli {
     db_name: String,
     #[arg(long, default_value_t = false)]
     skip_db: bool,
+    #[arg(long, value_name = "DIR")]
+    data_root: Option<PathBuf>,
+    #[arg(long, value_name = "DIR")]
+    pre_root: Option<PathBuf>,
+}
+
+fn default_home_path(relative_path: &str) -> PathBuf {
+    Path::new(&var("HOME").unwrap()).join(relative_path)
 }
 
 fn cast_col_to_bool(df: DataFrame, col_name: &str) -> Result<DataFrame, PolarsError> {
@@ -65,11 +73,11 @@ fn cast_col_to_bool(df: DataFrame, col_name: &str) -> Result<DataFrame, PolarsEr
 }
 
 pub fn main(cli: Cli) {
-    let dataset_path = format!(
-        "{}/scratch/relbench/{}",
-        var("HOME").unwrap(),
-        cli.db_name
-    );
+    let data_root = cli
+        .data_root
+        .unwrap_or_else(|| default_home_path("scratch/relbench"));
+    let dataset_path = data_root.join(&cli.db_name);
+    let dataset_path = dataset_path.to_string_lossy();
     println!("dataset_path {:?}", dataset_path);
 
     let dashes = dataset_path.matches("-").count();
@@ -714,8 +722,12 @@ pub fn main(cli: Cli) {
     pbar.finish();
     println!("done in {:?}.", tic.elapsed());
 
-    let pre_path = format!("{}/scratch/pre/{}", var("HOME").unwrap(), cli.db_name);
-    fs::create_dir_all(Path::new(&pre_path)).unwrap();
+    let pre_root = cli
+        .pre_root
+        .unwrap_or_else(|| default_home_path("scratch/pre"));
+    let pre_path = pre_root.join(&cli.db_name);
+    fs::create_dir_all(&pre_path).unwrap();
+    let pre_path = pre_path.to_string_lossy();
 
     println!("writing out text...");
     let tic = Instant::now();

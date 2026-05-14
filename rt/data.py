@@ -1,6 +1,7 @@
 import json
 import os
 from functools import cache
+from pathlib import Path
 
 import maturin_import_hook
 import ml_dtypes  # noqa: F401
@@ -15,13 +16,19 @@ maturin_import_hook.install(settings=MaturinSettings(release=True, uv=True))
 from rustler import Sampler
 
 
+def get_pre_dir(db_name: str) -> Path:
+    home = Path(os.environ.get("HOME", "."))
+    default_pre_root = home / "scratch" / "pre"
+    pre_root = Path(os.environ.get("PLUREL_PRE_ROOT", str(default_pre_root))).expanduser()
+    return pre_root / db_name
+
+
 @cache
 def _load_column_index(db_name: str) -> dict:
     """
     Load the column index mapping for a dataset (cached).
     """
-    home = os.environ.get("HOME", ".")
-    column_index_path = os.path.join(home, "scratch", "pre", db_name, "column_index.json")
+    column_index_path = get_pre_dir(db_name) / "column_index.json"
 
     with open(column_index_path) as f:
         return json.load(f)
@@ -65,7 +72,7 @@ class RelationalDataset(Dataset):
             elif split == "test":
                 split = "Test"
 
-            table_info_path = f"{os.environ['HOME']}/scratch/pre/{db_name}/table_info.json"
+            table_info_path = get_pre_dir(db_name) / "table_info.json"
             with open(table_info_path) as f:
                 table_info = json.load(f)
 

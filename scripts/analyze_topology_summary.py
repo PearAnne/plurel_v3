@@ -78,8 +78,20 @@ def load_summary_as_frame(summary_path: Path) -> pd.DataFrame:
             record[f"m_{key}"] = value
         records.append(record)
     frame = pd.DataFrame(records)
+    frame = _ensure_fk_rate_columns(frame)
     frame["benchmark_family"] = frame["db_name"].apply(_benchmark_family_for)
     return frame
+
+
+def _ensure_fk_rate_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    if "m_true_null_rate" in frame.columns and "m_unmatched_fk_rate" in frame.columns:
+        return frame
+    normalized = frame.copy()
+    if "m_true_null_rate" not in normalized.columns:
+        normalized["m_true_null_rate"] = normalized.get("m_null_rate", 0.0)
+    if "m_unmatched_fk_rate" not in normalized.columns:
+        normalized["m_unmatched_fk_rate"] = 0.0
+    return normalized
 
 
 def _benchmark_family_for(db_name: str) -> str:
@@ -157,8 +169,11 @@ def categorize_edges(frame: pd.DataFrame) -> dict[str, int]:
     }
 
 
-def null_rate_breakdown(frame: pd.DataFrame) -> dict[str, int | float]:
-    null_rate = pd.to_numeric(frame["m_null_rate"], errors="coerce").fillna(0.0)
+def null_rate_breakdown(
+    frame: pd.DataFrame, metric: str = "m_true_null_rate"
+) -> dict[str, int | float]:
+    frame = _ensure_fk_rate_columns(frame)
+    null_rate = pd.to_numeric(frame[metric], errors="coerce").fillna(0.0)
     bins = {
         "zero": int((null_rate == 0).sum()),
         "small_(0_0.05]": int(((null_rate > 0) & (null_rate <= 0.05)).sum()),
@@ -177,6 +192,7 @@ def null_rate_breakdown(frame: pd.DataFrame) -> dict[str, int | float]:
 
 
 def derive_prior_recommendations(frame: pd.DataFrame) -> list[PriorRecommendation]:
+    frame = _ensure_fk_rate_columns(frame)
     defaults = SCMParams()
     plausible = frame[frame["m_powerlaw_plausible"] == True]  # noqa: E712
 
@@ -184,12 +200,10 @@ def derive_prior_recommendations(frame: pd.DataFrame) -> list[PriorRecommendatio
     pa_alpha_q = finite_quantiles(frame.get("m_pa_exponent_alpha", pd.Series(dtype=float)))
     theta_alpha_q = finite_quantiles(frame.get("m_theta_beta_alpha", pd.Series(dtype=float)))
     theta_beta_q = finite_quantiles(frame.get("m_theta_beta_beta", pd.Series(dtype=float)))
-    null_q_all = finite_quantiles(frame["m_null_rate"])
-    null_q_nonzero = finite_quantiles(
-        pd.to_numeric(frame["m_null_rate"], errors="coerce").loc[
-            pd.to_numeric(frame["m_null_rate"], errors="coerce") > 0
-        ]
-    )
+    true_null = pd.to_numeric(frame["m_true_null_rate"], errors="coerce")
+    unmatched_fk = pd.to_numeric(frame["m_unmatched_fk_rate"], errors="coerce").fillna(0.0)
+    null_q_all = finite_quantiles(true_null)
+    null_q_nonzero = finite_quantiles(true_null.loc[true_null > 0])
 
     categories = categorize_edges(frame)
     pl_share = categories["plausible_powerlaw"] / max(1, categories["total"])
@@ -282,7 +296,7 @@ def derive_prior_recommendations(frame: pd.DataFrame) -> list[PriorRecommendatio
         ),
         PriorRecommendation(
             config_field="edge_prior_null_rate_choices",
-            source_metric="null_rate",
+            source_metric="true_null_rate",
             population=(
                 f"all edges (N={null_q_all.count}); nonzero subset (N={null_q_nonzero.count})"
             ),
@@ -290,14 +304,15 @@ def derive_prior_recommendations(frame: pd.DataFrame) -> list[PriorRecommendatio
             suggested_value=[0.0, _round(null_q_all.p90 or 0.0, 2)],
             current_kind=defaults.edge_prior_null_rate_choices.kind,
             current_value=list(defaults.edge_prior_null_rate_choices.value),
-            confidence="low",
+            confidence=("low" if float(unmatched_fk.max()) > 0.0 else "medium"),
             rationale=(
-                "Distribution is multi-modal: ~64% of edges have null_rate=0, ~16% in "
-                f"(0, 0.05], ~20% > 0.05 with several near 1.0. A single range "
-                f"[0.0, {_round(null_q_all.p90 or 0.0, 2)}] captures 90% but misses the "
-                "structural-null tail. Recommend introducing a `null_rate_strategy` mixture "
-                "field in Phase 1b (e.g. {p_zero=0.65, range_nonzero=[0.001, 0.6]}) rather "
-                "than forcing this into a single `Choices(range=...)`."
+                "This uses real missing FK values only. `unmatched_fk_rate` is excluded "
+                "because it means a non-null FK value could not be mapped to the parent "
+                "primary-key column, usually an adapter/schema issue rather than a business "
+                "nullable relationship. The true-null distribution remains multi-modal, so "
+                f"a single range [0.0, {_round(null_q_all.p90 or 0.0, 2)}] is only a coarse "
+                "placeholder. A later `null_rate_strategy` mixture is still better than "
+                "forcing structural nulls into one `Choices(range=...)`."
             ),
         ),
         PriorRecommendation(
@@ -359,8 +374,11 @@ def render_markdown(
     summary_path: Path,
     timestamp: datetime,
 ) -> str:
+    frame = _ensure_fk_rate_columns(frame)
     categories = categorize_edges(frame)
-    null_bins = null_rate_breakdown(frame)
+    true_null_bins = null_rate_breakdown(frame, metric="m_true_null_rate")
+    unmatched_fk_bins = null_rate_breakdown(frame, metric="m_unmatched_fk_rate")
+    legacy_null_bins = null_rate_breakdown(frame, metric="m_null_rate")
     db_names = sorted(frame["db_name"].unique())
     families = sorted(frame["benchmark_family"].unique())
 
@@ -442,18 +460,54 @@ def render_markdown(
     )
 
     lines.append("")
-    lines.append("## 4. Null-rate distribution (multi-modal — single range can't capture it)")
+    lines.append("## 4. FK missingness split")
     lines.append("")
-    lines.append(f"- null_rate = 0: **{null_bins['zero']}** edges")
-    lines.append(f"- null_rate ∈ (0, 0.05]: **{null_bins['small_(0_0.05]']}** edges")
-    lines.append(f"- null_rate ∈ (0.05, 0.3]: **{null_bins['medium_(0.05_0.3]']}** edges")
-    lines.append(f"- null_rate ∈ (0.3, 0.9]: **{null_bins['high_(0.3_0.9]']}** edges")
-    lines.append(f"- null_rate ∈ (0.9, 1.0]: **{null_bins['extreme_(0.9_1.0]']}** edges")
-    if null_bins.get("nonzero_p50") is not None:
+    lines.append(
+        "`null_rate` is now treated as a legacy total exclusion rate for fanout metrics. "
+        "Prior calibration uses `true_null_rate`; `unmatched_fk_rate` is reported as adapter "
+        "quality evidence and is not used to set generator null priors."
+    )
+    lines.append("")
+    lines.append("### true_null_rate")
+    lines.append("")
+    lines.append(f"- true_null_rate = 0: **{true_null_bins['zero']}** edges")
+    lines.append(f"- true_null_rate ∈ (0, 0.05]: **{true_null_bins['small_(0_0.05]']}** edges")
+    lines.append(f"- true_null_rate ∈ (0.05, 0.3]: **{true_null_bins['medium_(0.05_0.3]']}** edges")
+    lines.append(f"- true_null_rate ∈ (0.3, 0.9]: **{true_null_bins['high_(0.3_0.9]']}** edges")
+    lines.append(f"- true_null_rate ∈ (0.9, 1.0]: **{true_null_bins['extreme_(0.9_1.0]']}** edges")
+    if true_null_bins.get("nonzero_p50") is not None:
         lines.append(
-            f"- Of nonzero null_rates: p50={null_bins['nonzero_p50']:.3f}, "
-            f"p90={null_bins['nonzero_p90']:.3f}"
+            f"- Of nonzero true_null_rates: p50={true_null_bins['nonzero_p50']:.3f}, "
+            f"p90={true_null_bins['nonzero_p90']:.3f}"
         )
+    lines.append("")
+    lines.append("### unmatched_fk_rate")
+    lines.append("")
+    lines.append(f"- unmatched_fk_rate = 0: **{unmatched_fk_bins['zero']}** edges")
+    lines.append(
+        f"- unmatched_fk_rate ∈ (0, 0.05]: **{unmatched_fk_bins['small_(0_0.05]']}** edges"
+    )
+    lines.append(
+        f"- unmatched_fk_rate ∈ (0.05, 0.3]: **{unmatched_fk_bins['medium_(0.05_0.3]']}** edges"
+    )
+    lines.append(
+        f"- unmatched_fk_rate ∈ (0.3, 0.9]: **{unmatched_fk_bins['high_(0.3_0.9]']}** edges"
+    )
+    lines.append(
+        f"- unmatched_fk_rate ∈ (0.9, 1.0]: **{unmatched_fk_bins['extreme_(0.9_1.0]']}** edges"
+    )
+    if unmatched_fk_bins.get("nonzero_p50") is not None:
+        lines.append(
+            f"- Of nonzero unmatched_fk_rates: p50={unmatched_fk_bins['nonzero_p50']:.3f}, "
+            f"p90={unmatched_fk_bins['nonzero_p90']:.3f}"
+        )
+    lines.append("")
+    lines.append("### legacy null_rate")
+    lines.append("")
+    lines.append(
+        f"- legacy null_rate > 0: "
+        f"**{legacy_null_bins['small_(0_0.05]'] + legacy_null_bins['medium_(0.05_0.3]'] + legacy_null_bins['high_(0.3_0.9]'] + legacy_null_bins['extreme_(0.9_1.0]']}** edges"
+    )
 
     lines.append("")
     lines.append("## 5. Per-db distribution of plausible-only γ (for cross-db variance check)")
@@ -498,9 +552,15 @@ def render_markdown(
     lines.append("  keep default [0.0, 0.5] until ablation shows it matters.")
     lines.append("- **`bi_hsbm_*`** (HSBM hierarchy): could derive from bipartite fanout spectral")
     lines.append("  modes; deferred to Phase 1b refinement.")
-    lines.append("- **`null_rate` multi-modality**: the `Choices(range)` API is the wrong shape;")
+    lines.append(
+        "- **`true_null_rate` multi-modality**: the `Choices(range)` API is the wrong shape;"
+    )
     lines.append("  needs a Phase 1b extension (e.g. `null_rate_mixture` field) before the")
     lines.append("  empirical distribution can be faithfully reproduced.")
+    lines.append(
+        "- **`unmatched_fk_rate`**: nonzero values are data/adapter quality warnings, not "
+        "synthetic nullable-FK targets."
+    )
     lines.append("")
 
     lines.append("## 7. Open questions")

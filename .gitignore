@@ -224,3 +224,12 @@ examples/*.sql
 
 # wandb
 wandb/
+
+# Local experiment outputs
+out/
+output/
+notes/
+reference/
+
+# IDE
+.cursor/

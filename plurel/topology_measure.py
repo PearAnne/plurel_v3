@@ -20,7 +20,9 @@ class EdgeTopologyRecord:
     num_children: int
     num_parents: int
     num_non_null_edges: int
-    metrics: dict[str, float | int | None]
+    metrics: dict[str, float | int | str | bool | None]
+    num_true_null_edges: int = 0
+    num_unmatched_fk_edges: int = 0
     is_self_loop: bool = False
 
 
@@ -60,21 +62,70 @@ def fk_values_to_parent_row_indices(
     parent_df: pd.DataFrame,
     parent_pkey_col: str,
 ) -> tuple[np.ndarray, np.ndarray]:
+    parent_idx, null_mask, _, _ = fk_values_to_parent_row_indices_with_quality(
+        fk=fk,
+        parent_df=parent_df,
+        parent_pkey_col=parent_pkey_col,
+    )
+    return parent_idx, null_mask
+
+
+def fk_values_to_parent_row_indices_with_quality(
+    fk: pd.Series,
+    parent_df: pd.DataFrame,
+    parent_pkey_col: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Map FK values to parent row indices via a left join (avoids ``Series.map`` edge cases)."""
-    n = len(fk)
     row_positions = np.arange(len(parent_df), dtype=np.int64)
     mapping = pd.DataFrame(
         {"_k": parent_df[parent_pkey_col].to_numpy(), "_row": row_positions}
     ).drop_duplicates(subset=["_k"], keep="first")
     left = pd.DataFrame({"_k": fk.reset_index(drop=True)})
-    merged = left.merge(mapping, on="_k", how="left", sort=False)
+    try:
+        merged = left.merge(mapping, on="_k", how="left", sort=False)
+    except ValueError:
+        left, mapping = _coerce_fk_merge_frames(fk=fk, parent_key=parent_df[parent_pkey_col])
+        mapping["_row"] = row_positions
+        mapping = mapping.drop_duplicates(subset=["_k"], keep="first")
+        merged = left.merge(mapping, on="_k", how="left", sort=False)
     null_mask_fk = fk.isna().to_numpy(dtype=bool)
     row_vals = merged["_row"]
     null_mask_mapper = row_vals.isna().to_numpy(dtype=bool)
-    null_mask = null_mask_fk | null_mask_mapper
+    unmatched_fk_mask = null_mask_mapper & ~null_mask_fk
+    null_mask = null_mask_fk | unmatched_fk_mask
     safe_rows = pd.to_numeric(row_vals, errors="coerce").fillna(0.0)
     parent_idx = np.where(null_mask, 0, safe_rows).astype(np.int64, copy=False)
-    return parent_idx, null_mask
+    return parent_idx, null_mask, null_mask_fk, unmatched_fk_mask
+
+
+def _coerce_fk_merge_frames(
+    fk: pd.Series, parent_key: pd.Series
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    fk_key = fk.reset_index(drop=True)
+    parent_key = parent_key.reset_index(drop=True)
+    fk_numeric = pd.to_numeric(fk_key, errors="coerce")
+    parent_numeric = pd.to_numeric(parent_key, errors="coerce")
+    if fk_numeric.notna().any() and parent_numeric.notna().any():
+        return pd.DataFrame({"_k": fk_numeric}), pd.DataFrame({"_k": parent_numeric})
+    return (
+        pd.DataFrame({"_k": fk_key.astype("string")}),
+        pd.DataFrame({"_k": parent_key.astype("string")}),
+    )
+
+
+def add_fk_quality_metrics(
+    metrics: dict[str, float | int | str | bool | None],
+    true_null_mask: np.ndarray,
+    unmatched_fk_mask: np.ndarray,
+) -> dict[str, float | int | str | bool | None]:
+    """Record FK data-quality rates separately from the fanout exclusion mask."""
+    if true_null_mask.shape != unmatched_fk_mask.shape:
+        raise ValueError("true_null_mask and unmatched_fk_mask must have the same shape")
+    total = int(true_null_mask.size)
+    enriched = dict(metrics)
+    enriched["true_null_rate"] = float(true_null_mask.mean()) if total else 0.0
+    enriched["unmatched_fk_rate"] = float(unmatched_fk_mask.mean()) if total else 0.0
+    return enriched
 
 
 def measure_topology_database(
@@ -104,7 +155,12 @@ def measure_topology_database(
         parent_df = parent.df
         total_child_rows += len(child_df)
 
-        parent_idx, null_mask = fk_values_to_parent_row_indices(
+        (
+            parent_idx,
+            null_mask,
+            true_null_mask,
+            unmatched_fk_mask,
+        ) = fk_values_to_parent_row_indices_with_quality(
             child_df[edge.fkey_col],
             parent_df,
             edge.parent_pkey_col,
@@ -121,6 +177,11 @@ def measure_topology_database(
             timestamps=timestamps,
             max_powerlaw_sample=max_powerlaw_sample,
         )
+        metrics = add_fk_quality_metrics(
+            metrics=metrics,
+            true_null_mask=true_null_mask,
+            unmatched_fk_mask=unmatched_fk_mask,
+        )
         records.append(
             EdgeTopologyRecord(
                 db_name=database.db_name,
@@ -131,6 +192,8 @@ def measure_topology_database(
                 num_parents=len(parent_df),
                 num_non_null_edges=int(np.count_nonzero(~null_mask)),
                 metrics=metrics,
+                num_true_null_edges=int(np.count_nonzero(true_null_mask)),
+                num_unmatched_fk_edges=int(np.count_nonzero(unmatched_fk_mask)),
                 is_self_loop=(edge.child_table == edge.parent_table),
             )
         )

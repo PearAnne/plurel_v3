@@ -1,7 +1,9 @@
+import json
 import os
 import random
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +19,28 @@ from tqdm.auto import tqdm
 
 from rt.data import RelationalDataset
 from rt.model import RelationalTransformer
+
+
+@dataclass(frozen=True)
+class EvalMetric:
+    split: str
+    db_name: str
+    table_name: str
+    metric_name: str
+    metric_value: float
+    higher_is_better: bool
+
+    @property
+    def key(self) -> tuple[str, str, str]:
+        return (self.db_name, self.table_name, self.metric_name)
+
+
+def is_better_metric(metric: EvalMetric, best_value: float | None) -> bool:
+    if best_value is None:
+        return True
+    if metric.higher_is_better:
+        return metric.metric_value > best_value
+    return metric.metric_value < best_value
 
 
 def seed_everything(seed=42):
@@ -96,6 +120,8 @@ def main(
     d_model,
     num_heads,
     d_ff,
+    cohort: str | None = None,
+    metrics_path: str | Path | None = None,
 ):
     seed_everything(seed)
 
@@ -115,6 +141,17 @@ def main(
     if rank == 0:
         run = wandb.init(project=project, config=locals(), reinit="finish_previous")
         print(run.name)
+
+    metrics_jsonl_path = None
+    if rank == 0 and (save_ckpt_dir is not None or metrics_path is not None):
+        save_ckpt_dir_ = Path(save_ckpt_dir).expanduser() if save_ckpt_dir is not None else None
+        metrics_jsonl_path = (
+            save_ckpt_dir_ / "metrics.jsonl"
+            if metrics_path is None
+            else Path(metrics_path).expanduser()
+        )
+        metrics_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        metrics_jsonl_path.write_text("", encoding="utf-8")
 
     # torch.multiprocessing.set_sharing_strategy("file_system")
     # torch._dynamo.config.cache_size_limit = 16
@@ -362,7 +399,15 @@ def main(
                         k = f"{metric_name}/{db_name}/{table_name}/{split}"
                         wandb.log({k: metric}, step=steps)
                         print(f"\nstep={steps}, \t{k}: {metric}")
-                        metrics[split][(db_name, table_name)] = metric
+                        metric_record = EvalMetric(
+                            split=split,
+                            db_name=db_name,
+                            table_name=table_name,
+                            metric_name=metric_name,
+                            metric_value=float(metric),
+                            higher_is_better=True,
+                        )
+                        metrics[split][metric_record.key] = metric_record
 
         if rank == 0:
             for avg_metric_name, _scores_dict in [
@@ -385,7 +430,15 @@ def main(
                 metric = np.mean(losses)
                 wandb.log({k: metric}, step=steps)
                 print(f"\nstep={steps}, \t{k}: {metric}")
-                metrics[split][("relbench-loss", "")] = metric
+                metric_record = EvalMetric(
+                    split=split,
+                    db_name="relbench-loss",
+                    table_name="",
+                    metric_name="loss",
+                    metric_value=float(metric),
+                    higher_is_better=False,
+                )
+                metrics[split][metric_record.key] = metric_record
 
             if len(synthetic_db_losses) > 0:
                 assert len(synthetic_db_losses) == 1, (
@@ -397,23 +450,54 @@ def main(
                     metric = np.mean(losses)
                     wandb.log({k: metric}, step=steps)
                     print(f"\nstep={steps}, \t{k}: {metric}")
-                    metrics[split][("rel-synthetic-loss", "")] = metric
+                    metric_record = EvalMetric(
+                        split=split,
+                        db_name="rel-synthetic-loss",
+                        table_name="",
+                        metric_name="loss",
+                        metric_value=float(metric),
+                        higher_is_better=False,
+                    )
+                    metrics[split][metric_record.key] = metric_record
 
         return metrics
 
-    def checkpoint(best=False, db_name="", table_name=""):
-        if rank != 0:
-            return
+    def checkpoint(best: bool = False, db_name: str = "", table_name: str = "") -> Path | None:
+        if rank != 0 or save_ckpt_dir is None:
+            return None
         save_ckpt_dir_ = Path(save_ckpt_dir).expanduser()
         save_ckpt_dir_.mkdir(parents=True, exist_ok=True)
         if best:
-            save_ckpt_path = f"{save_ckpt_dir_}/{db_name}_{table_name}_best.pt"
+            save_ckpt_path = save_ckpt_dir_ / f"{db_name}_{table_name}_best.pt"
         else:
-            save_ckpt_path = f"{save_ckpt_dir_}/{steps=}.pt"
+            save_ckpt_path = save_ckpt_dir_ / f"{steps=}.pt"
 
         state_dict = net.module.state_dict() if ddp else net.state_dict()
         torch.save(state_dict, save_ckpt_path)
         print(f"saved checkpoint to {save_ckpt_path}")
+        return save_ckpt_path
+
+    def append_metric_records(
+        metrics: dict[str, dict[tuple[str, str, str], EvalMetric]],
+        checkpoint_paths: dict[tuple[str, str, str], Path | None],
+    ) -> None:
+        if rank != 0 or metrics_jsonl_path is None:
+            return
+        with metrics_jsonl_path.open("a", encoding="utf-8") as handle:
+            for split_metrics in metrics.values():
+                for metric in split_metrics.values():
+                    checkpoint_path = checkpoint_paths.get(metric.key)
+                    payload = {
+                        "cohort": cohort or "",
+                        "step": steps,
+                        "split": metric.split,
+                        "db_name": metric.db_name,
+                        "table_name": metric.table_name,
+                        "metric_name": metric.metric_name,
+                        "metric_value": metric.metric_value,
+                        "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
+                    }
+                    handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
     pbar = tqdm(
         total=max_steps,
@@ -432,20 +516,28 @@ def main(
                 eval_pow2 and steps & (steps - 1) == 0
             ):
                 metrics = evaluate(net)
+                checkpoint_paths = {}
                 if save_ckpt_dir is not None:
-                    for (db_name, table_name), metric in metrics["val"].items():
-                        # Eval metric is always higher is better (auc, r2)
-                        best_metric = best_val_metrics.get((db_name, table_name), -float("inf"))
-                        if metric > best_metric:
-                            best_val_metrics[(db_name, table_name)] = metric
-                            best_test_metrics[(db_name, table_name)] = (
-                                metrics["test"][(db_name, table_name)]
-                                if (db_name, table_name) in metrics["test"]
-                                else float("nan")
+                    step_checkpoint_path = None
+                    for metric_key, metric in metrics["val"].items():
+                        best_metric = best_val_metrics.get(metric_key)
+                        if is_better_metric(metric=metric, best_value=best_metric):
+                            best_val_metrics[metric_key] = metric.metric_value
+                            best_test_metrics[metric_key] = (
+                                metrics["test"][metric_key]
+                                if metric_key in metrics["test"]
+                                else None
                             )
-                            checkpoint(best=True, db_name=db_name, table_name=table_name)
+                            checkpoint_paths[metric_key] = checkpoint(
+                                best=True,
+                                db_name=metric.db_name,
+                                table_name=metric.table_name,
+                            )
                         else:
-                            checkpoint()
+                            if step_checkpoint_path is None:
+                                step_checkpoint_path = checkpoint()
+                            checkpoint_paths[metric_key] = step_checkpoint_path
+                append_metric_records(metrics=metrics, checkpoint_paths=checkpoint_paths)
 
             net.train()
 
@@ -498,8 +590,9 @@ def main(
         print("\n" + "=" * 80)
         print("Best test metrics:")
         print("=" * 80)
-        for (db_name, table_name), metric in best_test_metrics.items():
-            print(f"{db_name}/{table_name}/test: {metric:.4f}")
+        for (db_name, table_name, metric_name), metric in best_test_metrics.items():
+            metric_value = metric.metric_value if metric is not None else float("nan")
+            print(f"{db_name}/{table_name}/test/{metric_name}: {metric_value:.4f}")
         print("=" * 80 + "\n")
 
     if ddp:

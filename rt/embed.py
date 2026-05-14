@@ -1,4 +1,7 @@
 import os
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import orjson
@@ -8,8 +11,21 @@ from ml_dtypes import bfloat16
 from sentence_transformers import SentenceTransformer
 
 
+def get_pre_dir(dataset_name: str) -> Path:
+    home = Path(os.environ.get("HOME", "."))
+    default_pre_root = home / "scratch" / "pre"
+    pre_root = Path(os.environ.get("PLUREL_PRE_ROOT", str(default_pre_root))).expanduser()
+    return pre_root / dataset_name
+
+
 class TextEmbedder:
-    def __init__(self, batch_size, embedding_model, device_type):
+    def __init__(
+        self,
+        batch_size: int,
+        embedding_model: str,
+        device_type: str,
+        compile_model: bool,
+    ) -> None:
         self.model = SentenceTransformer(
             f"sentence-transformers/{embedding_model}",
             device=device_type,
@@ -17,10 +33,15 @@ class TextEmbedder:
                 "dtype": torch.bfloat16 if device_type == "cuda" else torch.float32,
             },
         )
-        self.model = torch.compile(self.model)
+        if compile_model:
+            self.model = torch.compile(self.model)
         self.batch_size = batch_size
 
-    def __call__(self, text_list, device=None):
+    def __call__(
+        self,
+        text_list: Sequence[str],
+        device: str | list[str] | None = None,
+    ) -> Any:
         return self.model.encode(
             text_list,
             batch_size=self.batch_size,
@@ -31,11 +52,12 @@ class TextEmbedder:
 
 
 def main(
-    dataset_name,
-    device=None,
-    batch_size=8192,
-    embedding_model="all-MiniLM-L12-v2",
-):
+    dataset_name: str,
+    device: str | list[str] | None = None,
+    batch_size: int = 8192,
+    embedding_model: str = "all-MiniLM-L12-v2",
+    compile_model: bool | None = None,
+) -> None:
     if device is None:
         # Get list of all available CUDA devices
         if torch.cuda.is_available():
@@ -51,7 +73,11 @@ def main(
     else:
         device_type = torch.device(device).type
 
-    text_path = f"{os.environ['HOME']}/scratch/pre/{dataset_name}/text.json"
+    if compile_model is None:
+        compile_model = device_type == "cuda"
+
+    pre_dir = get_pre_dir(dataset_name)
+    text_path = pre_dir / "text.json"
     with open(text_path) as f:
         raw = f.read()
     text_list = orjson.loads(raw)
@@ -60,10 +86,11 @@ def main(
         batch_size,
         embedding_model=embedding_model,
         device_type=device_type,
+        compile_model=compile_model,
     )
     emb_list = text_embedder(text_list, device=device)
 
-    emb_path = f"{os.environ['HOME']}/scratch/pre/{dataset_name}/text_emb_{embedding_model}.bin"
+    emb_path = pre_dir / f"text_emb_{embedding_model}.bin"
     emb = np.stack(emb_list).astype(bfloat16)
     emb.tofile(emb_path)
 

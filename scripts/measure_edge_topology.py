@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 from plurel.topology_measure import (
     DatabaseTopologyStats,
     EdgeTopologyRecord,
+    add_fk_quality_metrics,
     load_database_stats,
     summarize_metrics,
     write_database_stats,
@@ -64,7 +65,9 @@ def measure_database(
 
         for fkey_col, parent_table_name in sorted(child_table.fkey_col_to_pkey_table.items()):
             parent_table = db.table_dict[parent_table_name]
-            parent_idx, null_mask = _prepare_parent_index(child_df[fkey_col])
+            parent_idx, null_mask, true_null_mask, unmatched_fk_mask = _prepare_parent_index(
+                child_df[fkey_col]
+            )
             timestamps = _extract_timestamps(child_df, child_table.time_col)
             metrics = compute_edge_metrics(
                 parent_idx=parent_idx,
@@ -72,6 +75,11 @@ def measure_database(
                 null_mask=null_mask,
                 timestamps=timestamps,
                 max_powerlaw_sample=max_powerlaw_sample,
+            )
+            metrics = add_fk_quality_metrics(
+                metrics=metrics,
+                true_null_mask=true_null_mask,
+                unmatched_fk_mask=unmatched_fk_mask,
             )
             records.append(
                 EdgeTopologyRecord(
@@ -83,6 +91,8 @@ def measure_database(
                     num_parents=len(parent_table.df),
                     num_non_null_edges=int(np.count_nonzero(~null_mask)),
                     metrics=metrics,
+                    num_true_null_edges=int(np.count_nonzero(true_null_mask)),
+                    num_unmatched_fk_edges=int(np.count_nonzero(unmatched_fk_mask)),
                     is_self_loop=(child_table_name == parent_table_name),
                 )
             )
@@ -97,12 +107,13 @@ def measure_database(
     )
 
 
-def _prepare_parent_index(series: Any) -> tuple[Any, Any]:
+def _prepare_parent_index(series: Any) -> tuple[Any, Any, Any, Any]:
     import numpy as np
 
     null_mask = series.isna().to_numpy(dtype=bool)
+    unmatched_fk_mask = np.zeros_like(null_mask, dtype=bool)
     parent_idx = series.fillna(0).to_numpy(dtype=np.int64, copy=False)
-    return parent_idx, null_mask
+    return parent_idx, null_mask, null_mask, unmatched_fk_mask
 
 
 def _extract_timestamps(df: Any, time_col: str | None) -> Any:

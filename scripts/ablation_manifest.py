@@ -47,6 +47,35 @@ def build_edge_prior_cohorts() -> dict[str, CohortSpec]:
             ),
             description="Per-edge uniform mixture over non-baseline topology priors.",
         ),
+        "G7_realistic_mix": CohortSpec(
+            name="G7_realistic_mix",
+            config=Config(
+                database_params=DatabaseParams(edge_prior_assignment_strategy="edge_level_uniform"),
+                scm_params=SCMParams(
+                    topology_prior_choices=Choices(
+                        kind="set",
+                        value=[
+                            "chung_lu",
+                            "chung_lu",
+                            "dcsbm",
+                            "dcsbm",
+                            "hsbm",
+                            "hsbm",
+                            "tpa",
+                        ],
+                    ),
+                    chung_lu_gamma_choices=Choices(kind="range", value=[1.93, 4.58]),
+                    dcsbm_theta_alpha_choices=Choices(kind="range", value=[1e-6, 0.51]),
+                    dcsbm_theta_beta_choices=Choices(kind="range", value=[1.41, 40.92]),
+                    tpa_alpha_choices=Choices(kind="range", value=[0.05, 0.78]),
+                    edge_prior_null_rate_choices=Choices(kind="range", value=[0.0, 0.0]),
+                ),
+            ),
+            description=(
+                "RelBench-calibrated per-edge mixture with reduced Chung-Lu weight, "
+                "DCSBM and HSBM block-locality components, and no structural nulls."
+            ),
+        ),
     }
 
 
@@ -107,9 +136,11 @@ def write_manifest(
     seeds_by_cohort: dict[str, list[int]],
     stages: list[str],
     pretrain_commands: list[str],
+    seed_pairing: str = "paired_schema",
 ) -> None:
     payload = {
         "stages": stages,
+        "seed_pairing": seed_pairing,
         "cohorts": cohort_manifest_rows(cohorts=cohorts, seeds_by_cohort=seeds_by_cohort),
         "pretrain_commands": pretrain_commands,
     }
