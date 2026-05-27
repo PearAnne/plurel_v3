@@ -87,6 +87,7 @@ def test_build_run_specs_uses_manifest_cohort_db_names(
         "rel-synthetic-G7_realistic_mix-16002",
     ]
     assert spec.rt_kwargs["max_steps"] == 101
+    assert spec.rt_kwargs["eval_freq"] == runner.DEFAULT_EVAL_FREQ
     assert spec.rt_kwargs["max_bfs_width"] == 128
     assert spec.rt_kwargs["cohort"] == "G7_realistic_mix"
     assert str(spec.save_ckpt_dir).endswith(
@@ -115,6 +116,37 @@ def test_build_run_specs_rejects_unknown_cohort(tmp_path: Path) -> None:
         )
 
 
+def test_build_run_specs_threads_custom_eval_freq(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path)
+    monkeypatch.setattr(
+        runner,
+        "generate_rel_synthetic_tasks_from_db_names",
+        _fake_task_bundle,
+    )
+
+    specs = runner.build_run_specs(
+        manifest_path=manifest_path,
+        cohorts=["G0_hsbm"],
+        num_train_dbs=2,
+        num_test_dbs=1,
+        max_steps=4001,
+        max_bfs_width=128,
+        cache_root=tmp_path / "relbench",
+        save_root=tmp_path / "runs",
+        seed=0,
+        batch_size=128,
+        eval_batch_size=128,
+        ctx_len=1024,
+        eval_freq=500,
+    )
+
+    assert specs[0].rt_kwargs["eval_freq"] == 500
+
+
 def test_run_specs_dry_run_does_not_call_rt_main(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -128,6 +160,7 @@ def test_run_specs_dry_run_does_not_call_rt_main(
             "train_tasks": [],
             "eval_tasks": [],
             "max_steps": 101,
+            "eval_freq": runner.DEFAULT_EVAL_FREQ,
             "max_bfs_width": 128,
         },
     )

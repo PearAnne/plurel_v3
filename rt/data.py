@@ -10,7 +10,7 @@ import torch
 from maturin_import_hook.settings import MaturinSettings
 from torch.utils.data import Dataset
 
-maturin_import_hook.install(settings=MaturinSettings(release=True, uv=True))
+maturin_import_hook.install(settings=MaturinSettings(release=True, uv=False))
 
 
 from rustler import Sampler
@@ -59,6 +59,7 @@ class RelationalDataset(Dataset):
         embedding_model,
         d_text,
         seed,
+        trace_sampling=False,
     ):
         dataset_tuples = []
         target_column_indices = []
@@ -103,6 +104,7 @@ class RelationalDataset(Dataset):
             seed=seed,
             target_columns=target_column_indices,
             columns_to_drop=drop_column_indices,
+            trace_sampling=trace_sampling,
         )
 
         self.seq_len = ctx_len

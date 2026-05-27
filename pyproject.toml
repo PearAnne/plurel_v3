@@ -55,11 +55,12 @@ build-backend = "hatchling.build"
 requires = ["hatchling"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["plurel"]
+packages = ["plurel", "rfm"]
 
 [tool.hatch.build.targets.sdist]
 only-include = [
     "plurel",
+    "rfm",
     "README.md",
     "LICENSE",
     "pyproject.toml",

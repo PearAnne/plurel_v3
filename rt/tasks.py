@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
+import pandas as pd
 
-from plurel import Config, SyntheticDataset
+from plurel import Config, RFMSyntheticDataset, SyntheticDataset
 from plurel.utils import set_random_seed
 
 TaskSpec = tuple[str, str, str, list[str]]
 SyntheticTaskBundle = dict[str, list[TaskSpec]]
+SyntheticBackend = Literal["plurel", "rfm"]
 
 
 def is_valid_db(db: Any) -> bool:
@@ -30,9 +32,9 @@ def get_tasks_info(db: Any, db_name: str, table_name: str) -> dict[str, list[Tas
         if "feature" not in col_name:
             continue
         task_ = (db_name, table_name, col_name, [])
-        if data_type in [bool]:
+        if pd.api.types.is_bool_dtype(data_type):
             clf_tasks.append(task_)
-        elif data_type in [int, float]:
+        elif pd.api.types.is_float_dtype(data_type) or pd.api.types.is_integer_dtype(data_type):
             reg_tasks.append(task_)
     return {"clf": clf_tasks, "reg": reg_tasks}
 
@@ -42,15 +44,18 @@ def get_clf_reg_tasks_for_db_names(
     cache_root: Path,
     max_db_count: int | None = None,
     per_db_task_limit: int | None = None,
+    backend: SyntheticBackend = "plurel",
 ) -> tuple[list[TaskSpec], list[TaskSpec]]:
     all_db_clf_tasks = []
     all_db_reg_tasks = []
     db_count = 0
     for db_name in db_names:
         seed = _seed_from_rel_synthetic_db_name(db_name)
-        dataset = SyntheticDataset(
+        dataset = _make_synthetic_dataset(
+            db_name=db_name,
             seed=seed,
-            config=Config(cache_dir=cache_root.expanduser() / db_name),
+            cache_root=cache_root,
+            backend=backend,
         )
         db = dataset.get_db()
         if not is_valid_db(db):
@@ -91,17 +96,44 @@ def _seed_from_rel_synthetic_db_name(db_name: str) -> int:
         raise ValueError(f"Cannot infer seed from synthetic DB name: {db_name}") from exc
 
 
+def _make_synthetic_dataset(
+    db_name: str,
+    seed: int,
+    cache_root: Path,
+    backend: SyntheticBackend,
+) -> Any:
+    cache_dir = cache_root.expanduser() / db_name
+    if backend == "plurel":
+        return SyntheticDataset(
+            seed=seed,
+            config=Config(cache_dir=cache_dir),
+        )
+    if backend == "rfm":
+        return RFMSyntheticDataset(seed=seed, cache_dir=cache_dir)
+    raise ValueError(f"unsupported synthetic backend: {backend}")
+
+
+def _synthetic_db_name(seed: int, backend: SyntheticBackend) -> str:
+    if backend == "plurel":
+        return f"rel-synthetic-{seed}"
+    if backend == "rfm":
+        return f"rel-synthetic-rfm-{seed}"
+    raise ValueError(f"unsupported synthetic backend: {backend}")
+
+
 def get_clf_reg_tasks(
     seeds: list[int],
     max_db_count: int,
     per_db_task_limit: int | None = None,
+    backend: SyntheticBackend = "plurel",
 ) -> tuple[list[TaskSpec], list[TaskSpec]]:
-    db_names = [f"rel-synthetic-{seed}" for seed in seeds]
+    db_names = [_synthetic_db_name(seed=seed, backend=backend) for seed in seeds]
     return get_clf_reg_tasks_for_db_names(
         db_names=db_names,
         cache_root=Path("~/.cache/relbench"),
         max_db_count=max_db_count,
         per_db_task_limit=per_db_task_limit,
+        backend=backend,
     )
 
 
@@ -111,6 +143,7 @@ def generate_rel_synthetic_tasks_from_db_names(
     cache_root: Path,
     skip_reg_tasks: bool = False,
     skip_clf_tasks: bool = False,
+    backend: SyntheticBackend = "plurel",
 ) -> SyntheticTaskBundle:
     set_random_seed(0)
     test_autocomplete_clf_tasks, test_autocomplete_reg_tasks = get_clf_reg_tasks_for_db_names(
@@ -118,11 +151,13 @@ def generate_rel_synthetic_tasks_from_db_names(
         cache_root=cache_root,
         max_db_count=len(test_db_names),
         per_db_task_limit=10,
+        backend=backend,
     )
     train_autocomplete_clf_tasks, train_autocomplete_reg_tasks = get_clf_reg_tasks_for_db_names(
         db_names=train_db_names,
         cache_root=cache_root,
         max_db_count=len(train_db_names),
+        backend=backend,
     )
 
     if skip_clf_tasks:
@@ -152,6 +187,7 @@ def generate_rel_synthetic_tasks(
     num_test_dbs: int,
     skip_reg_tasks: bool = False,
     skip_clf_tasks: bool = False,
+    backend: SyntheticBackend = "plurel",
 ) -> SyntheticTaskBundle:
     set_random_seed(0)
     seeds = [idx + offset for idx in range(num_dbs)]
@@ -166,11 +202,16 @@ def generate_rel_synthetic_tasks(
     train_seeds = seeds[2 * num_test_dbs :]
 
     test_autocomplete_clf_tasks, test_autocomplete_reg_tasks = get_clf_reg_tasks(
-        seeds=test_seeds, max_db_count=num_test_dbs, per_db_task_limit=10
+        seeds=test_seeds,
+        max_db_count=num_test_dbs,
+        per_db_task_limit=10,
+        backend=backend,
     )
 
     train_autocomplete_clf_tasks, train_autocomplete_reg_tasks = get_clf_reg_tasks(
-        seeds=train_seeds, max_db_count=num_train_dbs
+        seeds=train_seeds,
+        max_db_count=num_train_dbs,
+        backend=backend,
     )
 
     if skip_clf_tasks:

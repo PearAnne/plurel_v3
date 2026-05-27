@@ -3,7 +3,6 @@ use crate::common::{
 };
 use clap::Parser;
 use half::bf16;
-use itertools::izip;
 use memmap2::Mmap;
 use numpy::PyArray1;
 use pyo3::IntoPyObjectExt;
@@ -48,6 +47,21 @@ struct Vecs {
     is_padding: Vec<bool>,
     timestamps: Vec<i32>,
     true_batch_size: usize,
+    trace_sampling: bool,
+    trace_dataset_idxs: Vec<i64>,
+    trace_target_node_idxs: Vec<i64>,
+    trace_cells_used: Vec<i64>,
+    trace_ctx_lens: Vec<i64>,
+    trace_ctx_full: Vec<bool>,
+    trace_bfs_nodes: Vec<i64>,
+    trace_bfs_raw_cells_seen: Vec<i64>,
+    trace_bfs_cell_budget_hit: Vec<bool>,
+    trace_bfs_width_events: Vec<i64>,
+    trace_bfs_width_candidates: Vec<i64>,
+    trace_bfs_width_selected: Vec<i64>,
+    trace_bfs_width_dropped: Vec<i64>,
+    trace_bfs_width_max_candidates: Vec<i64>,
+    trace_f2p_slots_max: Vec<i64>,
 }
 
 struct Slices<'a> {
@@ -69,8 +83,32 @@ struct Slices<'a> {
     timestamps: &'a mut [i32],
 }
 
+#[derive(Default)]
+struct SamplingTrace {
+    dataset_idx: i64,
+    target_node_idx: i64,
+    cells_used: i64,
+    ctx_len: i64,
+    ctx_full: bool,
+    bfs_nodes: i64,
+    bfs_raw_cells_seen: i64,
+    bfs_cell_budget_hit: bool,
+    bfs_width_events: i64,
+    bfs_width_candidates: i64,
+    bfs_width_selected: i64,
+    bfs_width_dropped: i64,
+    bfs_width_max_candidates: i64,
+    f2p_slots_max: i64,
+}
+
 impl Vecs {
-    fn new(batch_size: usize, seq_len: usize, true_batch_size: usize, d_text: usize) -> Self {
+    fn new(
+        batch_size: usize,
+        seq_len: usize,
+        true_batch_size: usize,
+        d_text: usize,
+        trace_sampling: bool,
+    ) -> Self {
         let l = batch_size * seq_len;
         Self {
             node_idxs: vec![-1; l],
@@ -90,72 +128,70 @@ impl Vecs {
             is_padding: vec![true; l],
             timestamps: vec![i32::MIN; l],
             true_batch_size,
+            trace_sampling,
+            trace_dataset_idxs: vec![-1; batch_size],
+            trace_target_node_idxs: vec![-1; batch_size],
+            trace_cells_used: vec![0; batch_size],
+            trace_ctx_lens: vec![seq_len as i64; batch_size],
+            trace_ctx_full: vec![false; batch_size],
+            trace_bfs_nodes: vec![0; batch_size],
+            trace_bfs_raw_cells_seen: vec![0; batch_size],
+            trace_bfs_cell_budget_hit: vec![false; batch_size],
+            trace_bfs_width_events: vec![0; batch_size],
+            trace_bfs_width_candidates: vec![0; batch_size],
+            trace_bfs_width_selected: vec![0; batch_size],
+            trace_bfs_width_dropped: vec![0; batch_size],
+            trace_bfs_width_max_candidates: vec![0; batch_size],
+            trace_f2p_slots_max: vec![0; batch_size],
         }
     }
 
-    fn chunks_exact_mut(
-        &mut self,
-        seq_len: usize,
-        d_text: usize,
-    ) -> impl Iterator<Item = Slices<'_>> {
-        izip!(
-            self.node_idxs.chunks_exact_mut(seq_len),
-            self.f2p_nbr_idxs.chunks_exact_mut(seq_len * MAX_F2P_NBRS),
-            self.table_name_idxs.chunks_exact_mut(seq_len),
-            self.col_name_idxs.chunks_exact_mut(seq_len),
-            self.class_value_idxs.chunks_exact_mut(seq_len),
-            self.col_name_values.chunks_exact_mut(seq_len * d_text),
-            self.sem_types.chunks_exact_mut(seq_len),
-            self.number_values.chunks_exact_mut(seq_len),
-            self.text_values.chunks_exact_mut(seq_len * d_text),
-            self.datetime_values.chunks_exact_mut(seq_len),
-            self.boolean_values.chunks_exact_mut(seq_len),
-            self.masks.chunks_exact_mut(seq_len),
-            self.is_targets.chunks_exact_mut(seq_len),
-            self.is_task_nodes.chunks_exact_mut(seq_len),
-            self.is_padding.chunks_exact_mut(seq_len),
-            self.timestamps.chunks_exact_mut(seq_len)
-        )
-        .map(
-            |(
-                node_idxs,
-                f2p_nbr_idxs,
-                table_name_idxs,
-                col_name_idxs,
-                class_value_idxs,
-                col_name_values,
-                sem_types,
-                number_values,
-                text_values,
-                datetime_values,
-                boolean_values,
-                masks,
-                is_targets,
-                is_task_nodes,
-                is_padding,
-                timestamps,
-            )| Slices {
-                node_idxs,
-                f2p_nbr_idxs,
-                table_name_idxs,
-                col_name_idxs,
-                class_value_idxs,
-                col_name_values,
-                sem_types,
-                number_values,
-                text_values,
-                datetime_values,
-                boolean_values,
-                masks,
-                is_targets,
-                is_task_nodes,
-                is_padding,
-                timestamps,
-            },
-        )
+    fn slices_mut(&mut self, seq_idx: usize, seq_len: usize, d_text: usize) -> Slices<'_> {
+        let cell_start = seq_idx * seq_len;
+        let cell_end = cell_start + seq_len;
+        let nbr_start = cell_start * MAX_F2P_NBRS;
+        let nbr_end = cell_end * MAX_F2P_NBRS;
+        let text_start = cell_start * d_text;
+        let text_end = cell_end * d_text;
+        Slices {
+            node_idxs: &mut self.node_idxs[cell_start..cell_end],
+            f2p_nbr_idxs: &mut self.f2p_nbr_idxs[nbr_start..nbr_end],
+            table_name_idxs: &mut self.table_name_idxs[cell_start..cell_end],
+            col_name_idxs: &mut self.col_name_idxs[cell_start..cell_end],
+            class_value_idxs: &mut self.class_value_idxs[cell_start..cell_end],
+            col_name_values: &mut self.col_name_values[text_start..text_end],
+            sem_types: &mut self.sem_types[cell_start..cell_end],
+            number_values: &mut self.number_values[cell_start..cell_end],
+            text_values: &mut self.text_values[text_start..text_end],
+            datetime_values: &mut self.datetime_values[cell_start..cell_end],
+            boolean_values: &mut self.boolean_values[cell_start..cell_end],
+            masks: &mut self.masks[cell_start..cell_end],
+            is_targets: &mut self.is_targets[cell_start..cell_end],
+            is_task_nodes: &mut self.is_task_nodes[cell_start..cell_end],
+            is_padding: &mut self.is_padding[cell_start..cell_end],
+            timestamps: &mut self.timestamps[cell_start..cell_end],
+        }
     }
+
+    fn set_trace(&mut self, seq_idx: usize, trace: SamplingTrace) {
+        self.trace_dataset_idxs[seq_idx] = trace.dataset_idx;
+        self.trace_target_node_idxs[seq_idx] = trace.target_node_idx;
+        self.trace_cells_used[seq_idx] = trace.cells_used;
+        self.trace_ctx_lens[seq_idx] = trace.ctx_len;
+        self.trace_ctx_full[seq_idx] = trace.ctx_full;
+        self.trace_bfs_nodes[seq_idx] = trace.bfs_nodes;
+        self.trace_bfs_raw_cells_seen[seq_idx] = trace.bfs_raw_cells_seen;
+        self.trace_bfs_cell_budget_hit[seq_idx] = trace.bfs_cell_budget_hit;
+        self.trace_bfs_width_events[seq_idx] = trace.bfs_width_events;
+        self.trace_bfs_width_candidates[seq_idx] = trace.bfs_width_candidates;
+        self.trace_bfs_width_selected[seq_idx] = trace.bfs_width_selected;
+        self.trace_bfs_width_dropped[seq_idx] = trace.bfs_width_dropped;
+        self.trace_bfs_width_max_candidates[seq_idx] = trace.bfs_width_max_candidates;
+        self.trace_f2p_slots_max[seq_idx] = trace.f2p_slots_max;
+    }
+
     fn into_pyobject<'a>(self, py: Python<'a>) -> PyResult<Vec<PyObject>> {
-        Ok(vec![
+        let mut objects = vec![
             ("node_idxs", PyArray1::from_vec(py, self.node_idxs))
                 .into_py_any(py)
                 .unwrap(),
@@ -222,7 +258,87 @@ impl Vecs {
             ("true_batch_size", self.true_batch_size)
                 .into_py_any(py)
                 .unwrap(),
-        ])
+        ];
+        if self.trace_sampling {
+            objects.extend([
+                (
+                    "trace_dataset_idxs",
+                    PyArray1::from_vec(py, self.trace_dataset_idxs),
+                )
+                    .into_py_any(py)
+                    .unwrap(),
+                (
+                    "trace_target_node_idxs",
+                    PyArray1::from_vec(py, self.trace_target_node_idxs),
+                )
+                    .into_py_any(py)
+                    .unwrap(),
+                (
+                    "trace_cells_used",
+                    PyArray1::from_vec(py, self.trace_cells_used),
+                )
+                    .into_py_any(py)
+                    .unwrap(),
+                ("trace_ctx_lens", PyArray1::from_vec(py, self.trace_ctx_lens))
+                    .into_py_any(py)
+                    .unwrap(),
+                ("trace_ctx_full", PyArray1::from_vec(py, self.trace_ctx_full))
+                    .into_py_any(py)
+                    .unwrap(),
+                ("trace_bfs_nodes", PyArray1::from_vec(py, self.trace_bfs_nodes))
+                    .into_py_any(py)
+                    .unwrap(),
+                (
+                    "trace_bfs_raw_cells_seen",
+                    PyArray1::from_vec(py, self.trace_bfs_raw_cells_seen),
+                )
+                    .into_py_any(py)
+                    .unwrap(),
+                (
+                    "trace_bfs_cell_budget_hit",
+                    PyArray1::from_vec(py, self.trace_bfs_cell_budget_hit),
+                )
+                    .into_py_any(py)
+                    .unwrap(),
+                (
+                    "trace_bfs_width_events",
+                    PyArray1::from_vec(py, self.trace_bfs_width_events),
+                )
+                    .into_py_any(py)
+                    .unwrap(),
+                (
+                    "trace_bfs_width_candidates",
+                    PyArray1::from_vec(py, self.trace_bfs_width_candidates),
+                )
+                    .into_py_any(py)
+                    .unwrap(),
+                (
+                    "trace_bfs_width_selected",
+                    PyArray1::from_vec(py, self.trace_bfs_width_selected),
+                )
+                    .into_py_any(py)
+                    .unwrap(),
+                (
+                    "trace_bfs_width_dropped",
+                    PyArray1::from_vec(py, self.trace_bfs_width_dropped),
+                )
+                    .into_py_any(py)
+                    .unwrap(),
+                (
+                    "trace_bfs_width_max_candidates",
+                    PyArray1::from_vec(py, self.trace_bfs_width_max_candidates),
+                )
+                    .into_py_any(py)
+                    .unwrap(),
+                (
+                    "trace_f2p_slots_max",
+                    PyArray1::from_vec(py, self.trace_f2p_slots_max),
+                )
+                    .into_py_any(py)
+                    .unwrap(),
+            ]);
+        }
+        Ok(objects)
     }
 }
 
@@ -253,6 +369,7 @@ pub struct Sampler {
     target_columns: Vec<i32>,
     columns_to_drop: Vec<Vec<i32>>,
     dataset_tuples: Vec<(String, i32, i32)>, // (db_name, node_idx_offset, num_nodes) for each dataset
+    trace_sampling: bool,
 }
 
 #[pymethods]
@@ -271,6 +388,7 @@ impl Sampler {
         seed: u64,
         target_columns: Vec<i32>,
         columns_to_drop: Vec<Vec<i32>>,
+        trace_sampling: bool,
     ) -> Self {
         let mut datasets = Vec::new();
 
@@ -321,6 +439,7 @@ impl Sampler {
             target_columns,
             columns_to_drop,
             dataset_tuples,
+            trace_sampling,
         };
 
         sampler.create_items(0);
@@ -386,29 +505,39 @@ impl Sampler {
                 - batch_idx * self.batch_size * self.world_size,
         );
 
-        let mut vecs = Vecs::new(self.batch_size, self.ctx_len, true_batch_size, self.d_text);
+        let mut vecs = Vecs::new(
+            self.batch_size,
+            self.ctx_len,
+            true_batch_size,
+            self.d_text,
+            self.trace_sampling,
+        );
 
-        // Parallelize batch processing across sequences
-        vecs.chunks_exact_mut(self.ctx_len, self.d_text)
-            .enumerate()
-            .for_each(|(i, slices)| {
-                let j =
-                    batch_idx * self.batch_size * self.world_size + self.rank * self.batch_size + i;
-                // when self.batch_size > true_batch_size, this will wrap around
-                let j = j % self.items.len();
-                let item = &self.items[j];
-                self.seq(item, slices);
-            });
+        for i in 0..self.batch_size {
+            let j = batch_idx * self.batch_size * self.world_size + self.rank * self.batch_size + i;
+            // when self.batch_size > true_batch_size, this will wrap around
+            let j = j % self.items.len();
+            let item = &self.items[j];
+            let slices = vecs.slices_mut(i, self.ctx_len, self.d_text);
+            let trace = self.seq(item, slices);
+            vecs.set_trace(i, trace);
+        }
         vecs
     }
 
-    fn seq(&self, item: &Item, mut slices: Slices) {
+    fn seq(&self, item: &Item, mut slices: Slices) -> SamplingTrace {
         let dataset = &self.datasets[item.dataset_idx as usize];
         let target_column = self.target_columns[item.dataset_idx as usize];
         let columns_to_drop = &self.columns_to_drop[item.dataset_idx as usize];
 
         let target_node_idx = item.node_idx;
         let target_node = get_node(dataset, target_node_idx);
+        let mut trace = SamplingTrace {
+            dataset_idx: item.dataset_idx as i64,
+            target_node_idx: target_node_idx as i64,
+            ctx_len: self.ctx_len as i64,
+            ..Default::default()
+        };
 
         let mut visited = std::collections::HashSet::new();
         let mut visited_at_depth: HashMap<i32, usize> = HashMap::new();
@@ -424,7 +553,9 @@ impl Sampler {
             &mut rng,
             self.ctx_len,
             &mut visited_at_depth,
+            &mut trace,
         );
+        trace.bfs_nodes = bfs_nodes.len() as i64;
 
         for bfs_node_idx in bfs_nodes {
             if visited.contains(&bfs_node_idx) {
@@ -474,8 +605,12 @@ impl Sampler {
                 target_column,
                 &mut seq_i,
                 &mut slices,
+                &mut trace,
             );
         }
+        trace.cells_used = seq_i as i64;
+        trace.ctx_full = seq_i >= self.ctx_len;
+        trace
     }
 
     /// Add a single cell from a node to the sequence.
@@ -489,12 +624,14 @@ impl Sampler {
         target_column: i32,
         seq_i: &mut usize,
         slices: &mut Slices,
+        trace: &mut SamplingTrace,
     ) {
         let node = get_node(dataset, node_idx);
 
         slices.node_idxs[*seq_i] = node.node_idx.into();
 
         assert!(node.f2p_nbr_idxs.len() <= MAX_F2P_NBRS);
+        trace.f2p_slots_max = trace.f2p_slots_max.max(node.f2p_nbr_idxs.len() as i64);
         for (j, f2p_nbr_idx) in node.f2p_nbr_idxs.iter().enumerate() {
             slices.f2p_nbr_idxs[*seq_i * MAX_F2P_NBRS + j] = f2p_nbr_idx.into();
         }
@@ -539,6 +676,7 @@ impl Sampler {
         rng: &mut StdRng,
         max_cells: usize,
         visited_at_depth: &mut HashMap<i32, usize>,
+        trace: &mut SamplingTrace,
     ) -> Vec<i32> {
         let mut result = Vec::new();
 
@@ -585,7 +723,9 @@ impl Sampler {
 
             // Update number of cells collected
             num_cells += node.col_name_idxs.len();
+            trace.bfs_raw_cells_seen = num_cells as i64;
             if num_cells >= max_cells {
+                trace.bfs_cell_budget_hit = true;
                 return result;
             }
 
@@ -636,9 +776,17 @@ impl Sampler {
             }
 
             // Subsample DB edges based on max_bfs_width
+            trace.bfs_width_candidates += db_p2f_ftr.len() as i64;
+            trace.bfs_width_max_candidates = trace
+                .bfs_width_max_candidates
+                .max(db_p2f_ftr.len() as i64);
             let idxs = if db_p2f_ftr.len() > self.max_bfs_width {
+                trace.bfs_width_events += 1;
+                trace.bfs_width_selected += self.max_bfs_width as i64;
+                trace.bfs_width_dropped += (db_p2f_ftr.len() - self.max_bfs_width) as i64;
                 index::sample(rng, db_p2f_ftr.len(), self.max_bfs_width).into_vec()
             } else {
+                trace.bfs_width_selected += db_p2f_ftr.len() as i64;
                 (0..db_p2f_ftr.len()).collect::<Vec<_>>()
             };
 
@@ -699,6 +847,7 @@ pub fn main(cli: Cli) {
         0,                          // seed
         vec![-1; 1],                // target_columns
         vec![Vec::<i32>::new()],    // columns_to_drop
+        false,                      // trace_sampling
     );
     println!("Sampler loaded in {:?}", tic.elapsed());
 

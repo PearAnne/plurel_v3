@@ -4313,7 +4313,7 @@ packages:
 - pypi: ./
   name: plurel
   version: 1.0.0
-  sha256: d886c0178c783bfe91ff416a308723496c0da4d30be31adcf822422d1cd6455b
+  sha256: e589e54de029bdb7ee24b4b058c83edb8aa74a658c1be4c1c2dd7262878a2fad
   requires_dist:
   - networkx
   - numpy

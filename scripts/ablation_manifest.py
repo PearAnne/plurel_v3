@@ -51,32 +51,47 @@ def build_edge_prior_cohorts() -> dict[str, CohortSpec]:
             name="G7_realistic_mix",
             config=Config(
                 database_params=DatabaseParams(edge_prior_assignment_strategy="edge_level_uniform"),
-                scm_params=SCMParams(
-                    topology_prior_choices=Choices(
-                        kind="set",
-                        value=[
-                            "chung_lu",
-                            "chung_lu",
-                            "dcsbm",
-                            "dcsbm",
-                            "hsbm",
-                            "hsbm",
-                            "tpa",
-                        ],
-                    ),
-                    chung_lu_gamma_choices=Choices(kind="range", value=[1.93, 4.58]),
-                    dcsbm_theta_alpha_choices=Choices(kind="range", value=[1e-6, 0.51]),
-                    dcsbm_theta_beta_choices=Choices(kind="range", value=[1.41, 40.92]),
-                    tpa_alpha_choices=Choices(kind="range", value=[0.05, 0.78]),
-                    edge_prior_null_rate_choices=Choices(kind="range", value=[0.0, 0.0]),
-                ),
+                scm_params=_realistic_mix_scm_params(),
             ),
             description=(
                 "RelBench-calibrated per-edge mixture with reduced Chung-Lu weight, "
                 "DCSBM and HSBM block-locality components, and no structural nulls."
             ),
         ),
+        "G7_db": CohortSpec(
+            name="G7_db",
+            config=Config(
+                database_params=DatabaseParams(edge_prior_assignment_strategy="db_level"),
+                scm_params=_realistic_mix_scm_params(),
+            ),
+            description=(
+                "RelBench-calibrated DB-level mixture: each synthetic DB uses one prior kind "
+                "sampled from the G7 realistic prior multiset."
+            ),
+        ),
     }
+
+
+def _realistic_mix_scm_params() -> SCMParams:
+    return SCMParams(
+        topology_prior_choices=Choices(
+            kind="set",
+            value=[
+                "chung_lu",
+                "chung_lu",
+                "dcsbm",
+                "dcsbm",
+                "hsbm",
+                "hsbm",
+                "tpa",
+            ],
+        ),
+        chung_lu_gamma_choices=Choices(kind="range", value=[1.93, 4.58]),
+        dcsbm_theta_alpha_choices=Choices(kind="range", value=[1e-6, 0.51]),
+        dcsbm_theta_beta_choices=Choices(kind="range", value=[1.41, 40.92]),
+        tpa_alpha_choices=Choices(kind="range", value=[0.05, 0.78]),
+        edge_prior_null_rate_choices=Choices(kind="range", value=[0.0, 0.0]),
+    )
 
 
 def _single_prior(name: str, prior_kind: str, description: str) -> CohortSpec:

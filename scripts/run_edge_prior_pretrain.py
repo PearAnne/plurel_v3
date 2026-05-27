@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Any
 from rt.tasks import forecast_tasks, generate_rel_synthetic_tasks_from_db_names
 
 DEFAULT_EVAL_DBS = {"rel-hm", "rel-avito", "rel-stack", "rel-trial", "rel-f1", "rel-amazon"}
+DEFAULT_EVAL_FREQ = 400
 
 
 @dataclass(frozen=True)
@@ -63,7 +65,10 @@ def build_rt_kwargs(
     batch_size: int,
     eval_batch_size: int,
     ctx_len: int,
+    eval_freq: int = DEFAULT_EVAL_FREQ,
 ) -> dict[str, Any]:
+    if eval_freq <= 0:
+        raise ValueError(f"eval_freq must be positive, got {eval_freq}")
     rel_synthetic_tasks = generate_rel_synthetic_tasks_from_db_names(
         train_db_names=train_db_names,
         test_db_names=test_db_names,
@@ -76,7 +81,6 @@ def build_rt_kwargs(
     eval_tasks = [task for task in forecast_tasks if task[0] in DEFAULT_EVAL_DBS]
     eval_tasks += rel_synthetic_tasks["test_autocomplete_clf_tasks"]
     eval_tasks += rel_synthetic_tasks["test_autocomplete_reg_tasks"]
-    eval_freq = max(max_steps - 1, 1)
     return {
         "project": "rt",
         "eval_splits": ["val", "test"],
@@ -122,6 +126,7 @@ def build_run_specs(
     batch_size: int,
     eval_batch_size: int,
     ctx_len: int,
+    eval_freq: int = DEFAULT_EVAL_FREQ,
 ) -> list[CohortRunSpec]:
     manifest = load_manifest(manifest_path)
     rows = select_cohort_rows(manifest=manifest, cohorts=cohorts)
@@ -153,6 +158,7 @@ def build_run_specs(
             batch_size=batch_size,
             eval_batch_size=eval_batch_size,
             ctx_len=ctx_len,
+            eval_freq=eval_freq,
         )
         specs.append(
             CohortRunSpec(
@@ -177,6 +183,7 @@ def render_dry_run(specs: list[CohortRunSpec]) -> str:
             f"  train_tasks={len(spec.rt_kwargs['train_tasks'])}",
             f"  eval_tasks={len(spec.rt_kwargs['eval_tasks'])}",
             f"  max_steps={spec.rt_kwargs['max_steps']}",
+            f"  eval_freq={spec.rt_kwargs['eval_freq']}",
             f"  max_bfs_width={spec.rt_kwargs['max_bfs_width']}",
         ]
         if "batch_size" in spec.rt_kwargs:
@@ -192,11 +199,24 @@ def run_specs(specs: list[CohortRunSpec], pre_root: Path, dry_run: bool) -> None
     if dry_run:
         print(render_dry_run(specs))
         return
+    _ensure_python_bin_on_path()
     os.environ.setdefault("WANDB_MODE", "disabled")
     from rt.main import main as rt_main
 
     for spec in specs:
         rt_main(**spec.rt_kwargs)
+
+
+def _ensure_python_bin_on_path() -> None:
+    python_bin = Path(sys.executable).resolve().parent
+    python_env = python_bin.parent
+    path_entries = os.environ.get("PATH", "").split(os.pathsep)
+    if str(python_bin) not in path_entries:
+        os.environ["PATH"] = os.pathsep.join([str(python_bin), *path_entries])
+    os.environ.setdefault("VIRTUAL_ENV", str(python_env))
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix is not None and Path(conda_prefix).resolve() != python_env:
+        os.environ.pop("CONDA_PREFIX", None)
 
 
 def main() -> None:
@@ -206,6 +226,12 @@ def main() -> None:
     parser.add_argument("--num_train_dbs", type=int, default=8)
     parser.add_argument("--num_test_dbs", type=int, default=2)
     parser.add_argument("--max_steps", type=int, default=401)
+    parser.add_argument(
+        "--eval_freq",
+        type=int,
+        default=DEFAULT_EVAL_FREQ,
+        help="Evaluate every N training steps. Keep this small enough to see learning curves.",
+    )
     parser.add_argument("--max_bfs_width", type=int, default=128)
     parser.add_argument(
         "--batch_size",
@@ -240,6 +266,7 @@ def main() -> None:
         num_train_dbs=args.num_train_dbs,
         num_test_dbs=args.num_test_dbs,
         max_steps=args.max_steps,
+        eval_freq=args.eval_freq,
         max_bfs_width=args.max_bfs_width,
         cache_root=args.cache_root,
         save_root=args.save_root,

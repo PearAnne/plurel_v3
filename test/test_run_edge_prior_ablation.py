@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.ablation_manifest import build_edge_prior_cohorts, summarize_config
 from scripts.run_edge_prior_ablation import (
     build_pretrain_commands,
     build_seeds_by_cohort,
@@ -28,6 +29,21 @@ def test_build_seeds_by_cohort_pairs_schema_seeds() -> None:
 
     assert result["G0_hsbm"] == [16000, 16001, 16002]
     assert result["G7_realistic_mix"] == [16000, 16001, 16002]
+
+
+def test_g7_db_uses_db_level_realistic_mix_prior() -> None:
+    cohorts = build_edge_prior_cohorts()
+    g7_edge = summarize_config(cohorts["G7_realistic_mix"].config)
+    g7_db = summarize_config(cohorts["G7_db"].config)
+
+    assert g7_db["edge_prior_assignment_strategy"] == "db_level"
+    assert g7_edge["edge_prior_assignment_strategy"] == "edge_level_uniform"
+    assert g7_db["topology_prior_choices"] == g7_edge["topology_prior_choices"]
+    assert g7_db["chung_lu_gamma_choices"] == g7_edge["chung_lu_gamma_choices"]
+    assert g7_db["dcsbm_theta_alpha_choices"] == g7_edge["dcsbm_theta_alpha_choices"]
+    assert g7_db["dcsbm_theta_beta_choices"] == g7_edge["dcsbm_theta_beta_choices"]
+    assert g7_db["tpa_alpha_choices"] == g7_edge["tpa_alpha_choices"]
+    assert g7_db["edge_prior_null_rate_choices"] == [0.0, 0.0]
 
 
 def test_build_pretrain_commands_points_to_cohort_aware_runner(tmp_path: Path) -> None:
