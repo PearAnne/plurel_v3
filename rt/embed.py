@@ -11,6 +11,25 @@ from ml_dtypes import bfloat16
 from sentence_transformers import SentenceTransformer
 
 
+def _patch_multiprocess_resource_tracker() -> None:
+    try:
+        from multiprocess.resource_tracker import ResourceTracker
+    except ImportError:
+        return
+
+    def safe_del(self: Any) -> None:
+        try:
+            self._stop(use_blocking_lock=False)
+        except AttributeError as exc:
+            if "_recursion_count" not in str(exc):
+                raise
+
+    ResourceTracker.__del__ = safe_del
+
+
+_patch_multiprocess_resource_tracker()
+
+
 def get_pre_dir(dataset_name: str) -> Path:
     home = Path(os.environ.get("HOME", "."))
     default_pre_root = home / "scratch" / "pre"
@@ -62,7 +81,7 @@ def main(
         # Get list of all available CUDA devices
         if torch.cuda.is_available():
             num_devices = torch.cuda.device_count()
-            device = [f"cuda:{i}" for i in range(num_devices)]
+            device = "cuda:0" if num_devices == 1 else [f"cuda:{i}" for i in range(num_devices)]
             print(f"Found {num_devices} CUDA device(s): {device}")
         else:
             device = "cpu"

@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 from rt.main import main as rt_main
-from rt.tasks import generate_rel_synthetic_tasks_from_db_names
+from rt.tasks import forecast_tasks, generate_rel_synthetic_tasks_from_db_names
 
 
 def _rfm_db_names(seed_offset: int, count: int) -> list[str]:
@@ -27,6 +27,7 @@ def main(
     save_ckpt_dir: Path | None,
     skip_reg_tasks: bool = False,
     skip_clf_tasks: bool = False,
+    real_eval_datasets: list[str] | None = None,
 ) -> None:
     cache_root = cache_root.expanduser()
     pre_root = pre_root.expanduser()
@@ -49,10 +50,14 @@ def main(
         rel_synthetic_tasks["train_autocomplete_clf_tasks"]
         + rel_synthetic_tasks["train_autocomplete_reg_tasks"]
     )
-    eval_tasks = (
+    eval_tasks: list = (
         rel_synthetic_tasks["test_autocomplete_clf_tasks"]
         + rel_synthetic_tasks["test_autocomplete_reg_tasks"]
     )
+    if real_eval_datasets:
+        real_forecast_tasks = [t for t in forecast_tasks if t[0] in real_eval_datasets]
+        eval_tasks = real_forecast_tasks + eval_tasks
+        print(f"Real eval tasks ({real_eval_datasets}): {len(real_forecast_tasks)}")
     if not train_tasks:
         raise ValueError("RFM synthetic pretraining found no train tasks")
     if not eval_tasks:
@@ -111,6 +116,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--skip_reg_tasks", action="store_true")
     parser.add_argument("--skip_clf_tasks", action="store_true")
+    parser.add_argument(
+        "--real_eval_datasets",
+        nargs="*",
+        default=None,
+        help="Real RelBench datasets to include in evaluation (e.g. rel-f1 rel-trial).",
+    )
     args = parser.parse_args()
 
     main(
@@ -128,4 +139,5 @@ if __name__ == "__main__":
         save_ckpt_dir=args.save_ckpt_dir,
         skip_reg_tasks=args.skip_reg_tasks,
         skip_clf_tasks=args.skip_clf_tasks,
+        real_eval_datasets=args.real_eval_datasets,
     )

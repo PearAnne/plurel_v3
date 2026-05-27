@@ -39,6 +39,16 @@ struct ColStat {
     std: f64,
 }
 
+fn normalize_value(value: f64, stat: &ColStat) -> f64 {
+    if !value.is_finite() {
+        return value;
+    }
+    if !stat.mean.is_finite() || !stat.std.is_finite() || stat.std.abs() <= f64::EPSILON {
+        return 0.0;
+    }
+    (value - stat.mean) / stat.std
+}
+
 #[derive(Debug, Clone, Default)]
 struct Table {
     table_name: String,
@@ -393,6 +403,11 @@ pub fn main(cli: Cli) {
                     let col_float = col.cast(&DataType::Float64).unwrap().drop_nulls();
                     let col_mean = col_float.mean().unwrap_or(0.0);
                     let col_std = col_float.std(1).unwrap_or(0.0);
+                    let col_std = if col_std.is_finite() && col_std > 0.0 {
+                        col_std
+                    } else {
+                        1.0
+                    };
 
                     table.col_stats.push(ColStat {
                         mean: col_mean,
@@ -460,8 +475,17 @@ pub fn main(cli: Cli) {
         }
     }
 
-    let dt_mean = dt_sum / dt_cnt as f64;
-    let dt_std = (dt_sum_sq / dt_cnt as f64 - dt_mean * dt_mean).sqrt();
+    let dt_mean = if dt_cnt > 0 { dt_sum / dt_cnt as f64 } else { 0.0 };
+    let dt_std = if dt_cnt > 0 {
+        (dt_sum_sq / dt_cnt as f64 - dt_mean * dt_mean).sqrt()
+    } else {
+        1.0
+    };
+    let dt_std = if dt_std.is_finite() && dt_std > 0.0 {
+        dt_std
+    } else {
+        1.0
+    };
     dbg!(dt_cnt);
     dbg!(dt_sum);
     dbg!(dt_sum_sq);
@@ -658,7 +682,7 @@ pub fn main(cli: Cli) {
                     AnyValue::Null => {}
                     AnyValue::Boolean(val) => {
                         let val_float = if val { 1.0 } else { 0.0 };
-                        let val_float = (val_float - col_stat.mean) / col_stat.std;
+                        let val_float = normalize_value(val_float, col_stat);
                         // println!("Column {}: boolean val: {} mean: {} std: {}", col.name(), val_float, col_stat.mean, col_stat.std);
                         node.boolean_values.push(val_float as f32);
                         node.number_values.push(0.0);
@@ -672,8 +696,8 @@ pub fn main(cli: Cli) {
                         if val.is_nan() {
                             continue;
                         }
-                        let val = (val - col_stat.mean) / col_stat.std;
-                        if val.is_infinite() {
+                        let val = normalize_value(val, col_stat);
+                        if !val.is_finite() {
                             dbg!(&table.table_name);
                             dbg!(col.name());
                             dbg!(col_stat);
@@ -689,7 +713,13 @@ pub fn main(cli: Cli) {
                     }
                     AnyValue::Datetime(val, unit, _) => {
                         assert!(unit == TimeUnit::Nanoseconds);
-                        let val = (val as f64 - dt_mean) / dt_std;
+                        let val = normalize_value(
+                            val as f64,
+                            &ColStat {
+                                mean: dt_mean,
+                                std: dt_std,
+                            },
+                        );
                         node.boolean_values.push(0.0);
                         node.number_values.push(0.0);
                         node.text_values.push(0);

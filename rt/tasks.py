@@ -32,11 +32,24 @@ def get_tasks_info(db: Any, db_name: str, table_name: str) -> dict[str, list[Tas
         if "feature" not in col_name:
             continue
         task_ = (db_name, table_name, col_name, [])
-        if pd.api.types.is_bool_dtype(data_type):
+        column = table.df[col_name]
+        if pd.api.types.is_bool_dtype(data_type) and _has_two_boolean_classes(column):
             clf_tasks.append(task_)
-        elif pd.api.types.is_float_dtype(data_type) or pd.api.types.is_integer_dtype(data_type):
+        elif (
+            pd.api.types.is_float_dtype(data_type) or pd.api.types.is_integer_dtype(data_type)
+        ) and _has_numeric_variance(column):
             reg_tasks.append(task_)
     return {"clf": clf_tasks, "reg": reg_tasks}
+
+
+def _has_two_boolean_classes(series: pd.Series) -> bool:
+    return series.dropna().nunique() >= 2
+
+
+def _has_numeric_variance(series: pd.Series) -> bool:
+    values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float, na_value=np.nan)
+    finite_values = values[np.isfinite(values)]
+    return np.unique(finite_values).size >= 2
 
 
 def get_clf_reg_tasks_for_db_names(

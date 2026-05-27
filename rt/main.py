@@ -9,7 +9,6 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.distributed as dist
-import wandb
 from sklearn.metrics import r2_score, roc_auc_score
 from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -17,6 +16,7 @@ from torch.nn.utils import clip_grads_with_norm_, get_total_norm
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
+import wandb
 from rt.data import RelationalDataset
 from rt.model import RelationalTransformer
 
@@ -203,7 +203,7 @@ def main(
                 eval_dataset,
                 batch_size=None,
                 num_workers=num_workers,
-                persistent_workers=True,
+                persistent_workers=num_workers > 0,
                 pin_memory=True,
                 in_order=True,
             )
@@ -330,10 +330,14 @@ def main(
                     batch["is_padding"][true_batch_size:, :] = True
 
                     loss, yhat_dict = net(batch)
-                    if np.isnan(loss.detach().cpu().numpy()):
+                    loss_value = float(loss.detach().to(torch.float32).cpu())
+                    if not np.isfinite(loss_value):
                         print(
-                            f"loss is nan for batch_idx: {batch_idx} with true_batch_size: {true_batch_size}"
+                            f"loss is non-finite for batch_idx: {batch_idx} "
+                            f"with true_batch_size: {true_batch_size}"
                         )
+                    else:
+                        losses.append(loss_value)
 
                     if task_type == "clf":
                         yhat = yhat_dict["boolean"][batch["is_targets"]]
@@ -347,7 +351,6 @@ def main(
 
                     pred = yhat.flatten()
 
-                    losses.append(loss.item())
                     preds.append(pred)
                     labels.append(y)
 
@@ -368,7 +371,7 @@ def main(
                     labels = [labels]
 
                 if rank == 0:
-                    loss = sum(losses) / len(losses)
+                    loss = sum(losses) / len(losses) if losses else float("nan")
                     k = f"loss/{db_name}/{table_name}/{split}"
                     avg_eval_load_time = sum(eval_load_times) / len(eval_load_times)
                     if "synthetic" in db_name:
@@ -386,28 +389,42 @@ def main(
                         preds = torch.cat(preds, dim=0).float().cpu().numpy()
                         labels = torch.cat(labels, dim=0).float().cpu().numpy()
 
-                        if task_type == "reg":
+                        metric_name = None
+                        metric = None
+                        if not np.isfinite(preds).all() or not np.isfinite(labels).all():
+                            print(
+                                f"WARNING: non-finite predictions or labels for "
+                                f"{db_name}/{table_name}/{split}, skipping metric"
+                            )
+                        elif task_type == "reg":
                             metric_name = "r2"
                             metric = r2_score(labels, preds)
                             r2_scores[split].append(metric)
                         elif task_type == "clf":
                             metric_name = "auc"
                             labels = [int(x > 0) for x in labels]
-                            metric = roc_auc_score(labels, preds)
-                            auc_scores[split].append(metric)
+                            if len(set(labels)) < 2:
+                                print(
+                                    f"WARNING: only one class present for "
+                                    f"{db_name}/{table_name}/{split}, skipping auc"
+                                )
+                            else:
+                                metric = roc_auc_score(labels, preds)
+                                auc_scores[split].append(metric)
 
-                        k = f"{metric_name}/{db_name}/{table_name}/{split}"
-                        wandb.log({k: metric}, step=steps)
-                        print(f"\nstep={steps}, \t{k}: {metric}")
-                        metric_record = EvalMetric(
-                            split=split,
-                            db_name=db_name,
-                            table_name=table_name,
-                            metric_name=metric_name,
-                            metric_value=float(metric),
-                            higher_is_better=True,
-                        )
-                        metrics[split][metric_record.key] = metric_record
+                        if metric is not None:
+                            k = f"{metric_name}/{db_name}/{table_name}/{split}"
+                            wandb.log({k: metric}, step=steps)
+                            print(f"\nstep={steps}, \t{k}: {metric}")
+                            metric_record = EvalMetric(
+                                split=split,
+                                db_name=db_name,
+                                table_name=table_name,
+                                metric_name=metric_name,
+                                metric_value=float(metric),
+                                higher_is_better=True,
+                            )
+                            metrics[split][metric_record.key] = metric_record
 
         if rank == 0:
             for avg_metric_name, _scores_dict in [
@@ -555,6 +572,8 @@ def main(
                 wandb.log({"load_time": load_time}, step=steps)
 
             loss, _yhat_dict = net(batch)
+            if not torch.isfinite(loss).item():
+                raise FloatingPointError(f"non-finite training loss at step {steps}")
             opt.zero_grad(set_to_none=True)
             loss.backward()
 

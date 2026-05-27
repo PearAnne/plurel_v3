@@ -60,7 +60,7 @@ class _FakeRFMSyntheticDataset:
                 "table_rfm": _FakeTable(
                     df=pd.DataFrame(
                         {
-                            "feature_bool": pd.Series([True, pd.NA], dtype="boolean"),
+                            "feature_bool": pd.Series([True, False], dtype="boolean"),
                             "feature_float": pd.Series([1.0, 2.0], dtype=float),
                         }
                     ),
@@ -142,3 +142,26 @@ def test_generate_rel_synthetic_tasks_from_db_names_supports_rfm_backend(
     assert [call[0] for call in _FakeRFMSyntheticDataset.calls] == [16000, 16001]
     assert _FakeRFMSyntheticDataset.calls[0][1].endswith("rel-synthetic-rfm-16000")
     assert _FakeRFMSyntheticDataset.calls[1][1].endswith("rel-synthetic-rfm-16001")
+
+
+def test_get_tasks_info_skips_degenerate_targets() -> None:
+    db = _FakeDb(
+        table_dict={
+            "table_a": _FakeTable(
+                df=pd.DataFrame(
+                    {
+                        "feature_bool_constant": pd.Series([True, True, pd.NA], dtype="boolean"),
+                        "feature_bool_valid": pd.Series([True, False, pd.NA], dtype="boolean"),
+                        "feature_float_constant": pd.Series([1.0, 1.0, 1.0], dtype=float),
+                        "feature_float_valid": pd.Series([1.0, 2.0, float("nan")], dtype=float),
+                    }
+                ),
+                fkey_col_to_pkey_table={},
+            )
+        }
+    )
+
+    tasks_info = tasks.get_tasks_info(db=db, db_name="rel-synthetic-rfm-1", table_name="table_a")
+
+    assert tasks_info["clf"] == [("rel-synthetic-rfm-1", "table_a", "feature_bool_valid", [])]
+    assert tasks_info["reg"] == [("rel-synthetic-rfm-1", "table_a", "feature_float_valid", [])]

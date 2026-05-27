@@ -226,7 +226,6 @@ examples/*.sql
 wandb/
 
 # Local experiment outputs
-out/
 output/
 notes/
 reference/
